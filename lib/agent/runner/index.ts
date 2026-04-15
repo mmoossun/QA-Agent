@@ -21,6 +21,7 @@ export interface AgentRunConfig {
   customPrompt?: string;          // natural language user instructions
   directScenarios?: QAScenario[]; // already-complete scenarios from uploaded file
   scenarioHints?: string[];       // text descriptions from uploaded file for AI to expand
+  reportLanguage?: "ko" | "en";  // language for AI-generated summary & recommendations
 }
 
 export interface AgentStatus {
@@ -133,7 +134,7 @@ export class AgentRunner {
     this.emit({ stage: "reporting", message: "Generating report...", progress: 90 });
     const reporter = new QAReporter();
     const duration = Date.now() - startTime;
-    const report = await reporter.generate(runId, this.config.targetUrl, scenarios, results, duration);
+    const report = await reporter.generate(runId, this.config.targetUrl, scenarios, results, duration, this.config.reportLanguage ?? "ko");
 
     this.emit({
       stage: "done",

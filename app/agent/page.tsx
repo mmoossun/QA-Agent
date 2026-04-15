@@ -167,7 +167,8 @@ export default function AgentPage() {
   const [targets, setTargets]           = useState<TargetEntry[]>(DEFAULT_TARGETS);
   const [categories, setCategories]     = useState<Set<Category>>(new Set(CATEGORIES.map((c) => c.id)));
   const [maxScenarios, setMaxScenarios] = useState(12);
-  const [customPrompt, setCustomPrompt] = useState("");
+  const [customPrompt, setCustomPrompt]   = useState("");
+  const [reportLanguage, setReportLanguage] = useState<"ko" | "en">("ko");
   const [sheet, setSheet]               = useState<ParsedSheet | null>(null);
   const [fileError, setFileError]       = useState<string | null>(null);
   const fileRef                         = useRef<HTMLInputElement>(null);
@@ -214,6 +215,7 @@ export default function AgentPage() {
     customPrompt:   customPrompt.trim()   || undefined,
     directScenarios: sheet?.direct.length ? sheet.direct : undefined,
     scenarioHints:   sheet?.hints.length  ? sheet.hints  : undefined,
+    reportLanguage,
   });
 
   // ── Full Run ───────────────────────────────────────────────
@@ -497,6 +499,17 @@ export default function AgentPage() {
           <div className="card p-5">
             <div className="flex items-center justify-between mb-2">
               <h2 className="font-semibold text-gray-900">✏️ 사용자 지시사항 (선택)</h2>
+              <div className="flex items-center gap-1 text-xs">
+                <span className="text-gray-400">리포트 언어</span>
+                <button
+                  onClick={() => setReportLanguage("ko")}
+                  className={`px-2 py-0.5 rounded-l border transition-colors ${reportLanguage === "ko" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-500 border-gray-200 hover:border-blue-300"}`}
+                >한국어</button>
+                <button
+                  onClick={() => setReportLanguage("en")}
+                  className={`px-2 py-0.5 rounded-r border-t border-b border-r transition-colors ${reportLanguage === "en" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-500 border-gray-200 hover:border-blue-300"}`}
+                >English</button>
+              </div>
               {customPrompt.trim() && (
                 <button onClick={() => setCustomPrompt("")} className="text-xs text-gray-400 hover:text-red-500 transition-colors">초기화</button>
               )}

@@ -14,7 +14,8 @@ export class QAReporter {
     targetUrl: string,
     scenarios: QAScenario[],
     results: TestResult[],
-    duration: number
+    duration: number,
+    reportLanguage: "ko" | "en" = "ko"
   ): Promise<QAReport> {
     const passed = results.filter((r) => r.status === "pass").length;
     const failed = results.filter((r) => r.status === "fail").length;
@@ -30,7 +31,7 @@ export class QAReporter {
     const bugReports = this._extractBugs(results, scenarios);
 
     // AI-generated summary and recommendations
-    const { summary, recommendations } = await this._generateInsights(results, scenarios);
+    const { summary, recommendations } = await this._generateInsights(results, scenarios, reportLanguage);
 
     const report: QAReport = {
       runId,
@@ -90,7 +91,8 @@ export class QAReporter {
 
   private async _generateInsights(
     results: TestResult[],
-    scenarios: QAScenario[]
+    scenarios: QAScenario[],
+    reportLanguage: "ko" | "en" = "ko"
   ): Promise<{ summary: string; recommendations: string[] }> {
     try {
       const data = {
@@ -103,12 +105,17 @@ export class QAReporter {
           .map((r) => ({ name: r.scenarioName, error: r.errorMessage, category: r.failureCategory })),
       };
 
+      const isKo = reportLanguage === "ko";
       const response = await chat(
         [{
           role: "user",
-          content: `Analyze these QA results and provide a concise summary and 3-5 actionable recommendations:\n${JSON.stringify(data, null, 2)}\n\nRespond as JSON: {"summary": "...", "recommendations": ["...", "..."]}`
+          content: isKo
+            ? `다음 QA 결과를 분석하여 간결한 요약과 3~5개의 실행 가능한 개선 권고를 한국어로 작성해줘:\n${JSON.stringify(data, null, 2)}\n\nJSON 형식으로만 응답: {"summary": "...", "recommendations": ["...", "..."]}`
+            : `Analyze these QA results and provide a concise summary and 3-5 actionable recommendations:\n${JSON.stringify(data, null, 2)}\n\nRespond as JSON only: {"summary": "...", "recommendations": ["...", "..."]}`,
         }],
-        "You are a senior QA engineer providing concise, actionable QA insights."
+        isKo
+          ? "당신은 시니어 QA 엔지니어입니다. 결과 분석과 개선 권고를 항상 한국어로 작성합니다."
+          : "You are a senior QA engineer providing concise, actionable QA insights in English."
       );
 
       const parsed = JSON.parse(
@@ -116,10 +123,16 @@ export class QAReporter {
       );
       return parsed;
     } catch {
-      return {
-        summary: `QA run completed. ${results.filter((r) => r.status === "pass").length}/${results.length} scenarios passed.`,
-        recommendations: ["Review failed scenarios", "Add retry logic for flaky tests"],
-      };
+      const passed = results.filter((r) => r.status === "pass").length;
+      return reportLanguage === "ko"
+        ? {
+            summary: `QA 실행 완료. 총 ${results.length}개 시나리오 중 ${passed}개 통과.`,
+            recommendations: ["실패한 시나리오를 검토하세요", "불안정한 테스트에 재시도 로직을 추가하세요"],
+          }
+        : {
+            summary: `QA run completed. ${passed}/${results.length} scenarios passed.`,
+            recommendations: ["Review failed scenarios", "Add retry logic for flaky tests"],
+          };
     }
   }
 
