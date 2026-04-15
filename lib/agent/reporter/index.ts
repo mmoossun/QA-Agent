@@ -15,7 +15,8 @@ export class QAReporter {
     scenarios: QAScenario[],
     results: TestResult[],
     duration: number,
-    reportLanguage: "ko" | "en" = "ko"
+    reportLanguage: "ko" | "en" = "ko",
+    skipAI = false
   ): Promise<QAReport> {
     const passed = results.filter((r) => r.status === "pass").length;
     const failed = results.filter((r) => r.status === "fail").length;
@@ -30,8 +31,10 @@ export class QAReporter {
     // Extract bugs from failures
     const bugReports = this._extractBugs(results, scenarios);
 
-    // AI-generated summary and recommendations
-    const { summary, recommendations } = await this._generateInsights(results, scenarios, reportLanguage);
+    // AI-generated summary and recommendations (skip for quick runs)
+    const { summary, recommendations } = skipAI
+      ? this._quickSummary(passed, failed, errors, total, reportLanguage)
+      : await this._generateInsights(results, scenarios, reportLanguage);
 
     const report: QAReport = {
       runId,
@@ -87,6 +90,29 @@ export class QAReporter {
           screenshotUrl: r.screenshotPath,
         };
       });
+  }
+
+  private _quickSummary(
+    passed: number,
+    failed: number,
+    errors: number,
+    total: number,
+    reportLanguage: "ko" | "en"
+  ): { summary: string; recommendations: string[] } {
+    const isKo = reportLanguage === "ko";
+    const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+    if (isKo) {
+      const summary = `총 ${total}개 시나리오 중 ${passed}개 통과 (${passRate}%)${failed > 0 ? `, ${failed}개 실패` : ""}${errors > 0 ? `, ${errors}개 오류` : ""}.`;
+      const recs = failed + errors > 0
+        ? ["실패한 시나리오의 스크린샷을 확인하세요", "셀렉터 또는 타이밍 문제일 수 있습니다"]
+        : ["모든 시나리오가 통과했습니다"];
+      return { summary, recommendations: recs };
+    }
+    const summary = `${passed}/${total} scenarios passed (${passRate}%)${failed > 0 ? `, ${failed} failed` : ""}${errors > 0 ? `, ${errors} errors` : ""}.`;
+    const recs = failed + errors > 0
+      ? ["Check screenshots for failed scenarios", "May be a selector or timing issue"]
+      : ["All scenarios passed"];
+    return { summary, recommendations: recs };
   }
 
   private async _generateInsights(

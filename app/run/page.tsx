@@ -871,9 +871,9 @@ export default function QuickRunPage() {
           body: JSON.stringify({
             scenarios: scenariosForSession,
             targetUrl: session.url,
-            loginEmail: session.type === "dashboard" ? session.loginEmail : undefined,
-            loginPassword: session.type === "dashboard" ? session.loginPassword : undefined,
-            options: { headless, maxRetries: 1 },
+            // Credentials omitted: each scenario already has loginSteps built in.
+            // Passing them would trigger redundant auth-caching login in the runner.
+            options: { headless, maxRetries: 0 },
           }),
         });
         const data = await res.json();

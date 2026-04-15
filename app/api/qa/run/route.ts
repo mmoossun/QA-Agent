@@ -9,6 +9,7 @@ import { QARunner } from "@/lib/qa/runner";
 import { QAReporter } from "@/lib/agent/reporter";
 import { logger } from "@/lib/logger";
 import { v4 as uuidv4 } from "uuid";
+import { saveRun } from "@/lib/db/history";
 
 const RequestSchema = z.object({
   scenarios: z.array(z.any()).min(1),
@@ -61,9 +62,26 @@ export async function POST(req: NextRequest) {
 
     const duration = Date.now() - startTime;
     const reporter = new QAReporter();
-    const report = await reporter.generate(runId, targetUrl, scenarios, results, duration);
+    const report = await reporter.generate(runId, targetUrl, scenarios, results, duration, "ko", true);
 
     logger.info({ runId, score: report.score, passRate: report.passRate.toFixed(1) }, "QA run complete");
+
+    const passCount = results.filter((r) => r.status === "pass").length;
+    const failCount = results.length - passCount;
+    saveRun({
+      id: runId,
+      mode: "quick",
+      targetUrl,
+      scenarioCount: results.length,
+      passCount,
+      failCount,
+      score: report.score ?? null,
+      passRate: report.passRate,
+      duration,
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      summary: report.summary,
+    });
 
     return NextResponse.json({ success: true, runId, report });
   } catch (err) {

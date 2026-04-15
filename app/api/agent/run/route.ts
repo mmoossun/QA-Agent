@@ -7,6 +7,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { AgentRunner, type AgentStatus } from "@/lib/agent/runner";
 import { logger } from "@/lib/logger";
+import { saveRun } from "@/lib/db/history";
+import { v4 as uuidv4 } from "uuid";
 
 const RequestSchema = z.object({
   targetUrl: z.string().url(),
@@ -59,8 +61,26 @@ export async function POST(req: NextRequest) {
           });
 
           send({ type: "start", message: "Agent started", targetUrl });
+          const startTime = Date.now();
+          const runId = uuidv4().slice(0, 12);
           const report = await agent.run();
           send({ type: "complete", report });
+
+          // Persist run to history
+          saveRun({
+            id: runId,
+            mode: "agent",
+            targetUrl,
+            scenarioCount: report.totalScenarios,
+            passCount: report.passed,
+            failCount: report.failed + report.errors,
+            score: report.score,
+            passRate: report.passRate,
+            duration: Date.now() - startTime,
+            status: "completed",
+            createdAt: new Date().toISOString(),
+            summary: report.summary,
+          });
         } catch (err) {
           logger.error({ err }, "Agent run error");
           send({ type: "error", message: String(err) });

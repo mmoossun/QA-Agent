@@ -84,6 +84,8 @@ export function ChatInterface() {
           history,
           executeNow: false, // we handle execution ourselves
           targetUrl: activeTargets[0]?.url,
+          loginEmail: activeTargets[0]?.loginEmail || undefined,
+          loginPassword: activeTargets[0]?.loginPassword || undefined,
         }),
       });
       const data = await res.json();

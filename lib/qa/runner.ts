@@ -192,7 +192,7 @@ export class QARunner {
         { timeout: 15_000 }
       );
     } catch {
-      await page.waitForLoadState("networkidle");
+      await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
     }
 
     logger.info({ email: loginEmail, url: page.url() }, "Login performed");
@@ -418,7 +418,7 @@ export class QARunner {
   }
 
   // ─── Run all scenarios (parallel batches) ────────────────
-  async runAll(scenarios: QAScenario[], concurrency = 3): Promise<TestResult[]> {
+  async runAll(scenarios: QAScenario[], concurrency = 2): Promise<TestResult[]> {
     const sorted = [...scenarios].sort((a, b) => priorityScore(b) - priorityScore(a));
     const results: TestResult[] = new Array(sorted.length);
 
