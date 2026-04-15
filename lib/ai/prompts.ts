@@ -29,16 +29,32 @@ Analyze screenshots and DOM information to understand:
 Identify the TOP 5 most important user flows to test based on business impact.
 Output structured JSON only.`;
 
-export const AGENT_SCENARIO_SYSTEM = `You are a QA scenario architect.
+export const AGENT_SCENARIO_SYSTEM = `You are a QA scenario architect specializing in Playwright test automation.
 Given a site structure, generate comprehensive test scenarios covering:
 - Happy path (primary user journey)
 - Edge cases (boundary conditions, invalid inputs)
 - Security (XSS attempts, auth bypass)
-- UI consistency
-- Error handling
+- UI consistency and error handling
 
-For each scenario, provide Playwright-ready steps with fallback selectors.
-Score each scenario by: priority * coverage * risk.`;
+CRITICAL RULES — violating these makes a scenario worthless:
+1. NEVER use placeholder credentials like "user@example.com" or "ValidPassword123". Use ONLY the real credentials provided in the prompt.
+2. Every auth scenario MUST include a "waitForUrl" step after login submit to verify the redirect actually happened.
+3. Every scenario MUST include at least one "assert" or "waitForUrl" step. Screenshot-only scenarios are forbidden.
+4. For error scenarios (wrong password, empty fields): assert that an error/alert element is visible.
+5. Available actions: navigate, click, fill, assert, wait, screenshot, scroll, hover, press, evaluate, waitForUrl.
+6. "waitForUrl" value must be a glob pattern like "**/w/**" or the full URL.
+7. "assert" target should check a URL-verifiable element or visible error text.
+
+SELECTOR RULES — wrong selectors cause 100% failure rate:
+- Email inputs: ALWAYS use css "input[type='email']", NOT input[name='...']
+- Password inputs: ALWAYS use css "input[type='password']", NOT input[name='...']
+- If a field is described as 'input[placeholder="X"]' in the site structure, use that EXACT string as the css selector
+- NEVER invent input[name='Korean text'] — Korean text in field descriptions is the placeholder, not the name attribute
+- Submit buttons: use css "button[type='submit']"
+- Failed login verification: assert that login form is still visible using css "input[type='email']" or "input[type='password']" (if still on login page = login failed). Do NOT rely on app-specific error CSS classes.
+- If you need to verify an error toast/alert, use wait 2000 then assert "input[type='email']" still visible as the login-failed proof.
+
+Output ONLY valid JSON array. No explanations.`;
 
 export const EVALUATOR_SYSTEM = `You are a QA quality evaluator.
 Analyze test execution results and score the QA system across these dimensions:
@@ -217,9 +233,18 @@ export function buildChatQAPrompt(userInput: string): string {
 Return ONLY a JSON array of QAScenario objects. No additional text.`;
 }
 
-export function buildScenarioGenPrompt(structure: SiteStructure): string {
-  return `Generate comprehensive QA test scenarios for this site.
+export function buildScenarioGenPrompt(
+  structure: SiteStructure,
+  credentials?: { email?: string; password?: string }
+): string {
+  const credSection = credentials?.email
+    ? `\nREAL CREDENTIALS (use these exactly — do NOT substitute placeholders):
+  email: "${credentials.email}"
+  password: "${credentials.password}"\n`
+    : "";
 
+  return `Generate comprehensive QA test scenarios for this site.
+${credSection}
 Site Analysis:
 ${JSON.stringify(structure, null, 2)}
 
@@ -228,11 +253,15 @@ Requirements:
 2. Test auth flows FIRST (highest priority)
 3. Include happy path + at least 2 edge cases per critical flow
 4. Use multi-fallback selectors: testId > ariaLabel > text > css
-5. Add screenshot steps at key checkpoints
-6. Mark payment/auth flows as "critical" priority
-7. Generate 10-20 scenarios total
+5. After every login submit: add a "waitForUrl" step with value "**/w/**" to confirm redirect
+6. For failed login tests: add an "assert" step checking for a visible error message (css: "[role='alert'], .error, [class*='error']")
+7. Mark payment/auth flows as "critical" priority
+8. Generate 10-20 scenarios total
+9. Every scenario MUST contain at least one assert or waitForUrl step
 
-Return a JSON array of QAScenario objects matching this TypeScript interface:
+Available actions: navigate, click, fill, assert, wait, screenshot, scroll, hover, press, evaluate, waitForUrl
+
+Return a JSON array of QAScenario objects:
 {
   id: string,
   name: string,
@@ -240,7 +269,7 @@ Return a JSON array of QAScenario objects matching this TypeScript interface:
   priority: "critical" | "high" | "medium" | "low",
   preconditions: string[],
   steps: Array<{
-    action: "navigate" | "click" | "fill" | "assert" | "wait" | "screenshot" | "scroll" | "hover" | "press",
+    action: "navigate"|"click"|"fill"|"assert"|"wait"|"screenshot"|"scroll"|"hover"|"press"|"evaluate"|"waitForUrl",
     target?: { testId?: string, ariaLabel?: string, text?: string, css?: string, xpath?: string, role?: string },
     value?: string,
     description: string,

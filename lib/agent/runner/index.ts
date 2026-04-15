@@ -77,7 +77,12 @@ export class AgentRunner {
     let scenarios: QAScenario[];
 
     try {
-      scenarios = await generator.generate(structure, this.config.targetUrl, this.config.scenarioCategories);
+      scenarios = await generator.generate(
+        structure,
+        this.config.targetUrl,
+        this.config.scenarioCategories,
+        { email: this.config.loginEmail, password: this.config.loginPassword }
+      );
       scenarios = scenarios.slice(0, this.config.maxScenarios);
       this.emit({
         stage: "generating",

@@ -111,10 +111,30 @@ async function scoreQAQuality(
     improvements.push("Mark login/payment flows as critical");
   }
 
-  const hasEdgeCases = scenarios.some((s) => s.tags?.includes("negative-test") || s.tags?.includes("edge-case"));
+  const hasEdgeCases = scenarios.some((s) =>
+    s.tags?.includes("negative-test") || s.tags?.includes("edge-case") ||
+    s.name.toLowerCase().includes("invalid") || s.name.toLowerCase().includes("error")
+  );
   if (!hasEdgeCases) {
     issues.push("No edge case / negative test scenarios");
     improvements.push("Add negative test cases (invalid input, error states)");
+  }
+
+  // Check meaningful assertions — scenarios must have assert or waitForUrl steps
+  const withMeaningfulAssert = scenarios.filter((s) =>
+    s.steps.some((step) => step.action === "assert" || step.action === "waitForUrl")
+  );
+  const assertCoverage = scenarios.length > 0 ? withMeaningfulAssert.length / scenarios.length : 0;
+  if (assertCoverage < 0.6) {
+    issues.push(`Only ${Math.round(assertCoverage * 100)}% of scenarios have meaningful assertions`);
+    improvements.push("Add assert/waitForUrl steps to verify actual outcomes, not just screenshots");
+  }
+
+  // Check waitForUrl usage (especially important for SPA auth flows)
+  const hasWaitForUrl = scenarios.some((s) => s.steps.some((step) => step.action === "waitForUrl"));
+  if (!hasWaitForUrl && categories.has("auth")) {
+    issues.push("Auth scenarios don't verify URL redirect after login");
+    improvements.push("Add waitForUrl step after login submit to confirm successful navigation");
   }
 
   // Check screenshot steps
@@ -124,18 +144,25 @@ async function scoreQAQuality(
     improvements.push("Add screenshot steps at key checkpoints");
   }
 
-  // Score calculation
-  let score = 60;
-  if (scenarios.length >= 10) score += 10;
-  if (scenarios.length >= 20) score += 5;
-  if (hasTestIds) score += 10;
+  // Score calculation — start at 50 (not 60) so trivial tests can't inflate the score
+  let score = 50;
+  if (scenarios.length >= 5) score += 5;
+  if (scenarios.length >= 10) score += 5;
+  if (scenarios.length >= 15) score += 5;
+  if (hasTestIds) score += 5;
   if (hasCritical) score += 5;
   if (hasEdgeCases) score += 5;
-  if (hasScreenshots) score += 5;
-  if (categories.size >= 4) score += 5;
+  if (hasScreenshots) score += 3;
+  if (categories.size >= 3) score += 4;
+  if (categories.size >= 5) score += 3;
+  // Assertion quality bonus — most important
+  score += Math.round(assertCoverage * 10); // up to +10 for full assertion coverage
+  if (hasWaitForUrl) score += 5;
+
   if (results.length > 0) {
     const passRate = results.filter((r) => r.status === "pass").length / results.length;
-    score = Math.round(score * passRate + score * 0.5);
+    // Pass rate multiplier: 100% pass = full score, 50% pass = ~75%, 0% = ~50%
+    score = Math.round(score * (0.5 + passRate * 0.5));
   }
 
   return { score: Math.min(100, score), issues, improvements };

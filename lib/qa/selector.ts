@@ -17,6 +17,9 @@ export async function resolveSelector(
   if (strategy.ariaLabel) {
     candidates.push({ name: `ariaLabel:${strategy.ariaLabel}`, locator: page.getByLabel(strategy.ariaLabel) });
   }
+  if (strategy.placeholder) {
+    candidates.push({ name: `placeholder:${strategy.placeholder}`, locator: page.locator(`[placeholder="${strategy.placeholder}"]`) });
+  }
   if (strategy.role && strategy.text) {
     candidates.push({
       name: `role:${strategy.role}+text`,

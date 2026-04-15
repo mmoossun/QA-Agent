@@ -2,6 +2,7 @@
  * QA Execution Engine — Playwright-based dynamic test runner
  * Features:
  * - Multi-strategy selector with auto-healing
+ * - Auth state caching (login once, reuse across all scenarios)
  * - Retry logic with exponential backoff
  * - Flaky test detection
  * - Screenshot on key steps and failures
@@ -11,6 +12,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import { v4 as uuidv4 } from "uuid";
 import type { QAScenario, QAStep, TestResult, StepResult } from "@/lib/ai/types";
 import { resolveSelector } from "./selector";
@@ -41,6 +43,7 @@ export class QARunner {
   private context: BrowserContext | null = null;
   private config: RunnerConfig;
   private opts: Required<RunnerOptions>;
+  private authStatePath: string | null = null;
 
   constructor(config: RunnerConfig) {
     this.config = config;
@@ -61,43 +64,98 @@ export class QARunner {
       slowMo: this.opts.slowMo,
     });
 
+    // If we have credentials, do a single login and cache auth state
+    if (this.config.loginEmail && this.config.loginPassword) {
+      await this._initAuthState();
+    }
+
+    await this._createContext();
+  }
+
+  /** Login once in a temporary context, save storageState, then close */
+  private async _initAuthState(): Promise<void> {
+    const tmpContext = await this.browser!.newContext({
+      viewport: { width: 1440, height: 900 },
+      locale: "ko-KR",
+      timezoneId: "Asia/Seoul",
+    });
+    const page = await tmpContext.newPage();
+
+    try {
+      await this._performLoginOnPage(page);
+      // Save auth cookies/storage to temp file
+      this.authStatePath = path.join(os.tmpdir(), `qa_auth_${uuidv4().slice(0, 8)}.json`);
+      await tmpContext.storageState({ path: this.authStatePath });
+      logger.info({ path: this.authStatePath }, "Auth state cached");
+    } catch (err) {
+      logger.warn({ err }, "Auth state caching failed — will login per scenario");
+      this.authStatePath = null;
+    } finally {
+      await page.close();
+      await tmpContext.close();
+    }
+  }
+
+  private async _createContext(): Promise<void> {
     const contextOptions: Parameters<Browser["newContext"]>[0] = {
       viewport: { width: 1440, height: 900 },
       locale: "ko-KR",
       timezoneId: "Asia/Seoul",
     };
 
-    if (this.opts.authState && fs.existsSync(this.opts.authState)) {
-      contextOptions.storageState = this.opts.authState;
+    // Use cached auth state if available
+    const statePath = this.authStatePath ?? (this.opts.authState && fs.existsSync(this.opts.authState) ? this.opts.authState : null);
+    if (statePath) {
+      contextOptions.storageState = statePath;
     }
 
-    this.context = await this.browser.newContext(contextOptions);
+    this.context = await this.browser!.newContext(contextOptions);
     this.context.setDefaultTimeout(this.opts.timeout);
   }
 
   async close(): Promise<void> {
     await this.context?.close();
     await this.browser?.close();
+    // Clean up temp auth file
+    if (this.authStatePath && fs.existsSync(this.authStatePath)) {
+      fs.unlinkSync(this.authStatePath);
+    }
   }
 
-  // ─── Persist auth state for reuse ─────────────────────────
   async saveAuthState(filePath: string): Promise<void> {
     await this.context?.storageState({ path: filePath });
   }
 
-  // ─── Login helper ─────────────────────────────────────────
-  async performLogin(page: Page): Promise<void> {
+  /** Perform login on a given page, returning after successful auth redirect */
+  private async _performLoginOnPage(page: Page): Promise<void> {
     const { loginEmail, loginPassword, baseUrl } = this.config;
     if (!loginEmail || !loginPassword) return;
 
-    await page.goto(`${baseUrl}/login`, { waitUntil: "networkidle" });
+    // Navigate to baseUrl (ZeroTalk login is at root, not /login)
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-    // Try multiple email field selectors
+    // If already logged in (redirected away from login page), skip
+    if (!page.url().includes(baseUrl.replace(/\/$/, "")) ||
+        (await page.locator('input[type="password"]').count()) === 0) {
+      // Try navigating to a login-specific path if available
+      const loginUrl = `${baseUrl}/login`;
+      try {
+        await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if ((await page.locator('input[type="password"]').count()) === 0) {
+          // Go back to base
+          await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+        }
+      } catch {
+        await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      }
+    }
+
+    // Fill email
     for (const sel of [
       'input[type="email"]',
       'input[name="email"]',
-      'input[placeholder*="email" i]',
       'input[placeholder*="이메일"]',
+      'input[placeholder*="email" i]',
     ]) {
       if ((await page.locator(sel).count()) > 0) {
         await page.fill(sel, loginEmail);
@@ -105,6 +163,7 @@ export class QARunner {
       }
     }
 
+    // Fill password
     for (const sel of ['input[type="password"]', 'input[name="password"]']) {
       if ((await page.locator(sel).count()) > 0) {
         await page.fill(sel, loginPassword);
@@ -112,10 +171,11 @@ export class QARunner {
       }
     }
 
+    // Submit
     for (const sel of [
       'button[type="submit"]',
-      'button:has-text("Login")',
       'button:has-text("로그인")',
+      'button:has-text("Login")',
       'button:has-text("Sign in")',
     ]) {
       if ((await page.locator(sel).count()) > 0) {
@@ -124,8 +184,18 @@ export class QARunner {
       }
     }
 
-    await page.waitForLoadState("networkidle");
-    logger.info({ email: loginEmail }, "Login performed");
+    // Wait for post-login navigation (URL should change from login page)
+    try {
+      await page.waitForFunction(
+        () => !document.querySelector('input[type="password"]') ||
+              window.location.pathname.length > 1,
+        { timeout: 15_000 }
+      );
+    } catch {
+      await page.waitForLoadState("networkidle");
+    }
+
+    logger.info({ email: loginEmail, url: page.url() }, "Login performed");
   }
 
   // ─── Run a single scenario with retry ─────────────────────
@@ -144,7 +214,6 @@ export class QARunner {
       if (result.status !== "fail" && result.status !== "error") return result;
       lastError = result.errorMessage;
 
-      // Classify failure
       if (result.failureCategory === "real_bug") break; // Don't retry real bugs
     }
 
@@ -156,20 +225,42 @@ export class QARunner {
     runId: string,
     attempt: number
   ): Promise<TestResult> {
-    const page = await this.context!.newPage();
+    // Auth category scenarios always run in a clean (unauthenticated) context
+    // so the login form is visible and can be tested properly.
+    const isAuthScenario = scenario.category === "auth" || scenario.category === "security";
+    let cleanContext: BrowserContext | null = null;
+    let page: Page;
+
+    if (isAuthScenario && this.authStatePath) {
+      // Fresh context without auth cookies
+      cleanContext = await this.browser!.newContext({
+        viewport: { width: 1440, height: 900 },
+        locale: "ko-KR",
+        timezoneId: "Asia/Seoul",
+      });
+      cleanContext.setDefaultTimeout(this.opts.timeout);
+      page = await cleanContext.newPage();
+    } else {
+      page = await this.context!.newPage();
+    }
+
     const stepResults: StepResult[] = [];
     const startTime = Date.now();
     let scenarioScreenshot: string | undefined;
 
     try {
-      // Login if needed
-      if (this.config.loginEmail) {
-        await this.performLogin(page);
-      }
-
-      // Navigate to base URL first
-      if (!page.url().includes(this.config.baseUrl)) {
-        await page.goto(this.config.baseUrl, { waitUntil: "networkidle" });
+      if (isAuthScenario) {
+        // Auth scenarios: start from the unauthenticated login page
+        await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      } else if (!this.authStatePath && this.config.loginEmail) {
+        // No cached auth — login fresh before running
+        await this._performLoginOnPage(page);
+      } else {
+        // Auth cookies set — navigate to base, should redirect to dashboard
+        await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        if ((await page.locator('input[type="password"]').count()) > 0) {
+          await this._performLoginOnPage(page);
+        }
       }
 
       // Execute each step
@@ -178,7 +269,6 @@ export class QARunner {
         stepResults.push(stepResult);
 
         if (stepResult.status === "fail") {
-          // Capture failure screenshot
           const ss = await this._screenshot(page, `${runId}_${scenario.id}_fail`);
           stepResult.screenshotPath = ss;
           scenarioScreenshot = ss;
@@ -213,21 +303,23 @@ export class QARunner {
       };
     } finally {
       await page.close();
+      if (cleanContext) await cleanContext.close();
     }
   }
 
-  private async _executeStep(page: Page, step: QAStep, runId: string): Promise<StepResult> {
+  private async _executeStep(page: Page, step: QAStep, _runId: string): Promise<StepResult> {
     const start = Date.now();
     let screenshot: string | undefined;
 
     try {
       switch (step.action) {
-        case "navigate":
+        case "navigate": {
           const url = step.value?.startsWith("http")
             ? step.value
             : `${this.config.baseUrl}${step.value ?? ""}`;
-          await page.goto(url, { waitUntil: "networkidle" });
+          await page.goto(url, { waitUntil: "domcontentloaded" });
           break;
+        }
 
         case "click": {
           const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000);
@@ -249,7 +341,7 @@ export class QARunner {
           if (step.value) {
             const text = await loc.textContent();
             if (!text?.includes(step.value)) {
-              throw new Error(`Assertion failed: expected "${step.value}" in "${text}"`);
+              throw new Error(`Assertion failed: expected "${step.value}" in "${text?.slice(0, 100)}"`);
             }
           }
           break;
@@ -260,7 +352,7 @@ export class QARunner {
           break;
 
         case "screenshot":
-          screenshot = await this._screenshot(page, `${runId}_step`);
+          screenshot = await this._screenshot(page, `${_runId}_step`);
           break;
 
         case "scroll":
@@ -278,13 +370,16 @@ export class QARunner {
           break;
 
         case "evaluate":
-          // Run arbitrary JS in page context — useful for widget APIs, console checks
           await page.evaluate(step.value ?? "");
           break;
 
         case "waitForUrl":
-          // Wait until URL matches a pattern
-          await page.waitForURL(step.value ?? "**", { timeout: step.timeout ?? 15_000 });
+          // Use "commit" so SPA client-side navigation (history.pushState) is detected.
+          // Default "load" never fires again after initial page load in SPAs.
+          await page.waitForURL(step.value ?? "**", {
+            timeout: step.timeout ?? 25_000,
+            waitUntil: "commit",
+          });
           break;
 
         default:

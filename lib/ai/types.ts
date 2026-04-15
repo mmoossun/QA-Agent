@@ -22,6 +22,7 @@ export interface QAStep {
 export interface SelectorStrategy {
   testId?: string;        // data-testid (highest priority)
   ariaLabel?: string;     // aria-label
+  placeholder?: string;  // input placeholder text
   text?: string;          // visible text
   css?: string;           // CSS selector
   xpath?: string;         // XPath (fallback)
