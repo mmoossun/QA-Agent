@@ -277,6 +277,16 @@ export class QARunner {
           await page.keyboard.press(step.value ?? "Enter");
           break;
 
+        case "evaluate":
+          // Run arbitrary JS in page context — useful for widget APIs, console checks
+          await page.evaluate(step.value ?? "");
+          break;
+
+        case "waitForUrl":
+          // Wait until URL matches a pattern
+          await page.waitForURL(step.value ?? "**", { timeout: step.timeout ?? 15_000 });
+          break;
+
         default:
           logger.warn({ action: step.action }, "Unknown step action");
       }

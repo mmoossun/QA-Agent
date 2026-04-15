@@ -9,10 +9,14 @@ import type { QAScenario, SiteStructure } from "@/lib/ai/types";
 import { logger } from "@/lib/logger";
 
 export class ScenarioGenerator {
-  async generate(structure: SiteStructure, targetUrl: string): Promise<QAScenario[]> {
-    logger.info({ url: targetUrl, routes: structure.routes.length }, "Generating scenarios");
+  async generate(structure: SiteStructure, targetUrl: string, categories?: string[]): Promise<QAScenario[]> {
+    logger.info({ url: targetUrl, routes: structure.routes.length, categories }, "Generating scenarios");
 
-    const prompt = buildScenarioGenPrompt(structure);
+    const categoryHint = categories && categories.length > 0
+      ? `\n\nFOCUS CATEGORIES: Generate scenarios primarily for these categories: ${categories.join(", ")}. Deprioritize or skip other categories.`
+      : "";
+
+    const prompt = buildScenarioGenPrompt(structure) + categoryHint;
 
     const response = await chat(
       [{ role: "user", content: prompt }],

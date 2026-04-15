@@ -12,7 +12,7 @@ export interface QAScenario {
 }
 
 export interface QAStep {
-  action: "navigate" | "click" | "fill" | "assert" | "wait" | "screenshot" | "scroll" | "hover" | "press";
+  action: "navigate" | "click" | "fill" | "assert" | "wait" | "screenshot" | "scroll" | "hover" | "press" | "evaluate" | "waitForUrl";
   target?: SelectorStrategy;
   value?: string;
   description: string;
@@ -94,7 +94,7 @@ export interface QAReport {
 export interface BugInfo {
   title: string;
   severity: "critical" | "high" | "medium" | "low";
-  category: "selector" | "timing" | "logic" | "ui" | "security";
+  category: "selector" | "timing" | "assertion" | "network" | "real_bug" | "logic" | "ui" | "security";
   description: string;
   steps: string[];
   expected: string;

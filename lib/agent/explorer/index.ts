@@ -181,7 +181,7 @@ export class SiteExplorer {
           return true;
         });
     }, origin);
-    return [...new Set(links)];
+    return Array.from(new Set(links));
   }
 
   private async _visitRoute(page: Page, url: string, origin: string): Promise<RouteInfo | null> {

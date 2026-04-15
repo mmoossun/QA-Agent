@@ -96,7 +96,7 @@ async function scoreQAQuality(
 
   // Check coverage
   const categories = new Set(scenarios.map((s) => s.category));
-  const requiredCategories = ["auth", "form", "ui"];
+  const requiredCategories: Array<"auth" | "form" | "ui" | "navigation" | "security" | "api" | "performance"> = ["auth", "form", "ui"];
   for (const cat of requiredCategories) {
     if (!categories.has(cat)) {
       issues.push(`Missing ${cat} test coverage`);

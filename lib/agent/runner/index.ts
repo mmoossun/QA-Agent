@@ -16,6 +16,7 @@ export interface AgentRunConfig {
   loginPassword?: string;
   maxScenarios?: number;
   timeBudgetMs?: number;
+  scenarioCategories?: string[];
   onProgress?: (status: AgentStatus) => void;
 }
 
@@ -76,7 +77,7 @@ export class AgentRunner {
     let scenarios: QAScenario[];
 
     try {
-      scenarios = await generator.generate(structure, this.config.targetUrl);
+      scenarios = await generator.generate(structure, this.config.targetUrl, this.config.scenarioCategories);
       scenarios = scenarios.slice(0, this.config.maxScenarios);
       this.emit({
         stage: "generating",

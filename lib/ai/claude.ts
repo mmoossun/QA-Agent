@@ -1,12 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as path from "path";
 import * as dotenv from "dotenv";
+import { chatOpenAI, OAI_MODEL, OAI_FAST_MODEL } from "@/lib/ai/openai";
 
 // Load .env at module level — works whether called from Next.js or tsx scripts
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 export const MODEL = "claude-opus-4-6";
 export const FAST_MODEL = "claude-haiku-4-5-20251001";
+
+/** Returns the active provider: "claude" | "openai" */
+export function getProvider(): "claude" | "openai" {
+  const p = (process.env.AI_PROVIDER ?? "claude").toLowerCase();
+  return p === "openai" ? "openai" : "claude";
+}
 
 // Lazy client — created on first use so env vars are always resolved
 let _client: Anthropic | null = null;
@@ -29,6 +36,7 @@ interface ChatMessage {
 }
 
 // ─── Core chat completion ──────────────────────────────────────
+// Routes to Claude or OpenAI based on AI_PROVIDER env var
 export async function chat(
   messages: ChatMessage[],
   systemPrompt: string,
@@ -38,15 +46,29 @@ export async function chat(
     useCache?: boolean;
   } = {}
 ): Promise<string> {
+  const provider = getProvider();
+
+  if (provider === "openai") {
+    // Map fast/slow model hints to OpenAI equivalents
+    let oaiModel = OAI_MODEL;
+    if (options.model === FAST_MODEL) oaiModel = OAI_FAST_MODEL;
+    return chatOpenAI(messages, systemPrompt, {
+      model: oaiModel,
+      maxTokens: options.maxTokens,
+    });
+  }
+
+  // ── Claude path ──
   const { model = MODEL, maxTokens = 4096, useCache = true } = options;
   const start = Date.now();
 
   const response = await getClient().messages.create({
     model,
     max_tokens: maxTokens,
-    system: useCache
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    system: (useCache
       ? [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }]
-      : systemPrompt,
+      : systemPrompt) as any,
     messages,
   });
 

@@ -13,6 +13,7 @@ const RequestSchema = z.object({
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
   maxScenarios: z.number().min(1).max(30).default(15),
+  scenarioCategories: z.array(z.string()).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { targetUrl, loginEmail, loginPassword, maxScenarios } = parsed.data;
+    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories } = parsed.data;
 
     // Server-Sent Events for real-time progress
     const encoder = new TextEncoder();
@@ -43,6 +44,7 @@ export async function POST(req: NextRequest) {
             loginEmail,
             loginPassword,
             maxScenarios,
+            scenarioCategories,
             onProgress: (status: AgentStatus) => {
               send({ type: "progress", ...status });
             },
