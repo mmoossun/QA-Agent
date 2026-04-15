@@ -794,6 +794,7 @@ export default function QuickRunPage() {
   const [headless, setHeadless]     = useState(true);
   const [isRunning, setIsRunning]   = useState(false);
   const [results, setResults]       = useState<RunResult[]>([]);
+  const [bulkPw, setBulkPw]         = useState("");
 
   const allGroups = Object.keys(GROUP_META) as AllGroups[];
   const filtered  = groupFilter === "all" ? SCENARIOS : SCENARIOS.filter((s) => s.group === groupFilter);
@@ -817,6 +818,18 @@ export default function QuickRunPage() {
 
   const updateWs = (id: string, ws: string) =>
     setSessions((p) => p.map((s) => s.id === id ? { ...s, workspace: ws } : s));
+
+  const updateEmail = (id: string, email: string) =>
+    setSessions((p) => p.map((s) => s.id === id ? { ...s, loginEmail: email } : s));
+
+  const updatePassword = (id: string, pw: string) =>
+    setSessions((p) => p.map((s) => s.id === id ? { ...s, loginPassword: pw } : s));
+
+  const applyBulkPw = () => {
+    if (!bulkPw.trim()) return;
+    setSessions((p) => p.map((s) => s.type === "dashboard" ? { ...s, loginPassword: bulkPw.trim() } : s));
+    setBulkPw("");
+  };
 
   const run = async () => {
     if (active.length === 0 || selCount === 0) return;
@@ -887,10 +900,36 @@ export default function QuickRunPage() {
         <div className="col-span-2 space-y-4">
           <div className="card p-5">
             <h2 className="font-semibold text-gray-900 mb-3">테스트 세션</h2>
+
+            {/* 일괄 비밀번호 */}
+            <div className="mb-3 flex gap-1.5">
+              <input
+                type="password"
+                placeholder="대시보드 세션 공통 비밀번호"
+                value={bulkPw}
+                onChange={(e) => setBulkPw(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyBulkPw()}
+                disabled={isRunning}
+                className="flex-1 text-xs border border-gray-200 rounded px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+              />
+              <button
+                onClick={applyBulkPw}
+                disabled={isRunning || !bulkPw.trim()}
+                className="text-xs px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 rounded border border-gray-200 disabled:opacity-40 transition-colors"
+              >
+                전체 적용
+              </button>
+            </div>
+
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">대시보드</p>
             <div className="space-y-1.5 mb-4">
               {sessions.filter((s) => s.type === "dashboard").map((s) => (
-                <SessionRow key={s.id} session={s} disabled={isRunning} onToggle={() => toggleSession(s.id)} />
+                <SessionRow
+                  key={s.id} session={s} disabled={isRunning}
+                  onToggle={() => toggleSession(s.id)}
+                  onEmailChange={(e) => updateEmail(s.id, e)}
+                  onPasswordChange={(p) => updatePassword(s.id, p)}
+                />
               ))}
             </div>
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">위젯 데모</p>
@@ -985,24 +1024,65 @@ export default function QuickRunPage() {
   );
 }
 
-function SessionRow({ session, disabled, onToggle, onWorkspaceChange }: {
-  session: Session; disabled: boolean; onToggle: () => void; onWorkspaceChange?: (ws: string) => void;
+function SessionRow({ session, disabled, onToggle, onWorkspaceChange, onEmailChange, onPasswordChange }: {
+  session: Session;
+  disabled: boolean;
+  onToggle: () => void;
+  onWorkspaceChange?: (ws: string) => void;
+  onEmailChange?: (email: string) => void;
+  onPasswordChange?: (pw: string) => void;
 }) {
+  const [showCreds, setShowCreds] = useState(false);
+
   return (
-    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors ${session.enabled ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}>
-      <input type="checkbox" checked={session.enabled} onChange={onToggle} disabled={disabled} className="w-4 h-4 rounded border-gray-300 shrink-0" />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs font-medium text-gray-800 truncate">{session.label}</span>
-          {session.role && <span className={`text-xs px-1 py-0.5 rounded font-medium shrink-0 ${ROLE_BADGE[session.role] ?? "bg-gray-100 text-gray-600"}`}>{session.role}</span>}
+    <div className={`rounded-lg border transition-colors ${session.enabled ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}>
+      <div className="flex items-center gap-2 px-3 py-2">
+        <input type="checkbox" checked={session.enabled} onChange={onToggle} disabled={disabled} className="w-4 h-4 rounded border-gray-300 shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-gray-800 truncate">{session.label}</span>
+            {session.role && <span className={`text-xs px-1 py-0.5 rounded font-medium shrink-0 ${ROLE_BADGE[session.role] ?? "bg-gray-100 text-gray-600"}`}>{session.role}</span>}
+          </div>
+          {session.loginEmail && !showCreds && (
+            <p className="text-xs text-gray-400 truncate">{session.loginEmail}</p>
+          )}
+          {session.type === "widget" && onWorkspaceChange && (
+            <select className="mt-1 text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white" value={session.workspace ?? "Brand1"} onChange={(e) => onWorkspaceChange(e.target.value)} disabled={disabled}>
+              {Object.keys(PLUGIN_KEYS).map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          )}
         </div>
-        {session.loginEmail && <p className="text-xs text-gray-400 truncate">{session.loginEmail}</p>}
-        {session.type === "widget" && onWorkspaceChange && (
-          <select className="mt-1 text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white" value={session.workspace ?? "Brand1"} onChange={(e) => onWorkspaceChange(e.target.value)} disabled={disabled}>
-            {Object.keys(PLUGIN_KEYS).map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
+        {session.type === "dashboard" && (
+          <button
+            onClick={() => setShowCreds((v) => !v)}
+            className="text-xs text-gray-400 hover:text-blue-500 transition-colors shrink-0 px-1"
+            title="로그인 정보 편집"
+          >
+            🔑
+          </button>
         )}
       </div>
+
+      {showCreds && session.type === "dashboard" && (
+        <div className="px-3 pb-2.5 space-y-1.5 border-t border-blue-100 pt-2">
+          <input
+            type="email"
+            placeholder="이메일"
+            value={session.loginEmail ?? ""}
+            onChange={(e) => onEmailChange?.(e.target.value)}
+            disabled={disabled}
+            className="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+          />
+          <input
+            type="password"
+            placeholder="비밀번호"
+            value={session.loginPassword ?? ""}
+            onChange={(e) => onPasswordChange?.(e.target.value)}
+            disabled={disabled}
+            className="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+          />
+        </div>
+      )}
     </div>
   );
 }
