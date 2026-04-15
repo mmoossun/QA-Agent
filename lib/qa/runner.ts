@@ -318,8 +318,8 @@ export class QARunner {
             ? step.value
             : `${this.config.baseUrl}${step.value ?? ""}`;
           await page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeout ?? 30_000 });
-          // After navigation, give SPA time to re-render (short idle wait)
-          await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
+          // Short idle wait for SPA re-render
+          await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
           break;
         }
 
@@ -327,10 +327,8 @@ export class QARunner {
           const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000);
           await loc.scrollIntoViewIfNeeded();
           await loc.click();
-          // SPA navigation: wait for network to settle, fall back to domcontentloaded
-          await page.waitForLoadState("networkidle", { timeout: 6_000 }).catch(() =>
-            page.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {})
-          );
+          // SPA navigation: short idle wait
+          await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => {});
           break;
         }
 
@@ -419,16 +417,25 @@ export class QARunner {
     };
   }
 
-  // ─── Run all scenarios ────────────────────────────────────
-  async runAll(scenarios: QAScenario[]): Promise<TestResult[]> {
+  // ─── Run all scenarios (parallel batches) ────────────────
+  async runAll(scenarios: QAScenario[], concurrency = 3): Promise<TestResult[]> {
     const sorted = [...scenarios].sort((a, b) => priorityScore(b) - priorityScore(a));
-    const results: TestResult[] = [];
+    const results: TestResult[] = new Array(sorted.length);
 
-    for (const scenario of sorted) {
-      logger.info({ id: scenario.id, name: scenario.name }, "Running scenario");
-      const result = await this.runScenario(scenario);
-      results.push(result);
-      logger.info({ id: scenario.id, status: result.status, ms: result.duration }, "Scenario done");
+    // Run in parallel batches — each scenario gets its own page, so they don't interfere
+    for (let i = 0; i < sorted.length; i += concurrency) {
+      const batch = sorted.slice(i, i + concurrency);
+      const batchResults = await Promise.all(
+        batch.map(async (scenario, batchIdx) => {
+          logger.info({ id: scenario.id, name: scenario.name }, "Running scenario");
+          const result = await this.runScenario(scenario);
+          logger.info({ id: scenario.id, status: result.status, ms: result.duration }, "Scenario done");
+          return { idx: i + batchIdx, result };
+        })
+      );
+      for (const { idx, result } of batchResults) {
+        results[idx] = result;
+      }
     }
 
     return results;

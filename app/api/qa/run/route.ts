@@ -18,7 +18,7 @@ const RequestSchema = z.object({
   options: z
     .object({
       headless: z.boolean().default(true),
-      maxRetries: z.number().min(0).max(5).default(2),
+      maxRetries: z.number().min(0).max(5).default(1),
       screenshotOnStep: z.boolean().default(false),
     })
     .default({}),
