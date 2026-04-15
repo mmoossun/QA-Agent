@@ -12,7 +12,8 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "improve": "tsx scripts/improve.ts",
-    "evaluate": "tsx scripts/evaluate.ts"
+    "evaluate": "tsx scripts/evaluate.ts",
+    "test:agent": "tsx scripts/run-agent-test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.28.0",
