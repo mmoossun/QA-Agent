@@ -1,0 +1,44 @@
+{
+  "name": "qa-saas",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "improve": "tsx scripts/improve.ts",
+    "evaluate": "tsx scripts/evaluate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.28.0",
+    "@prisma/client": "^5.15.0",
+    "next": "14.2.4",
+    "react": "^18",
+    "react-dom": "^18",
+    "playwright": "^1.44.0",
+    "zod": "^3.23.8",
+    "date-fns": "^3.6.0",
+    "uuid": "^10.0.0",
+    "pino": "^9.3.1",
+    "pino-pretty": "^11.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@types/uuid": "^10",
+    "autoprefixer": "^10.0.1",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.4",
+    "postcss": "^8",
+    "prisma": "^5.15.0",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.16.2",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,117 @@
+// Prisma schema — SQLite (dev) / PostgreSQL (prod)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User ────────────────────────────────────────────────────
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects  Project[]
+  agentRuns AgentRun[]
+  testRuns  TestRun[]
+}
+
+// ─── Project ─────────────────────────────────────────────────
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userId   String
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  testRuns TestRun[]
+  agentRuns AgentRun[]
+}
+
+// ─── TestRun ─────────────────────────────────────────────────
+model TestRun {
+  id          String   @id @default(cuid())
+  status      String   @default("pending") // pending | running | completed | failed
+  mode        String   @default("chat")    // chat | agent
+  inputPrompt String
+  scenarios   String   // JSON array of QAScenario
+  results     String?  // JSON array of TestResult
+  summary     String?  // JSON summary
+  score       Float?
+  duration    Int?     // ms
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project?   @relation(fields: [projectId], references: [id])
+  bugReports BugReport[]
+}
+
+// ─── BugReport ───────────────────────────────────────────────
+model BugReport {
+  id           String   @id @default(cuid())
+  title        String
+  severity     String   // critical | high | medium | low
+  category     String   // selector | timing | logic | ui | security
+  description  String
+  steps        String   // JSON steps to reproduce
+  expected     String
+  actual       String
+  screenshotUrl String?
+  status       String   @default("open") // open | fixed | wontfix
+  createdAt    DateTime @default(now())
+
+  testRunId String
+  testRun   TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+}
+
+// ─── AgentRun ─────────────────────────────────────────────────
+model AgentRun {
+  id           String   @id @default(cuid())
+  targetUrl    String
+  loginEmail   String?
+  status       String   @default("pending") // pending | exploring | generating | running | reporting | done | failed
+  iteration    Int      @default(0)
+  score        Float?
+  scoreBefore  Float?
+  scoreAfter   Float?
+  exploration  String?  // JSON: site structure discovered
+  scenarios    String?  // JSON: generated scenarios
+  results      String?  // JSON: test results
+  report       String?  // JSON: final QA report
+  improvements String?  // JSON: suggested improvements
+  commitHash   String?
+  duration     Int?
+  errorMsg     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id])
+}
+
+// ─── ImprovementHistory ─────────────────────────────────────
+model ImprovementHistory {
+  id          String   @id @default(cuid())
+  iteration   Int
+  scoreBefore Float
+  scoreAfter  Float
+  commitHash  String?
+  commitMsg   String?
+  changes     String   // JSON: what was changed
+  issues      String   // JSON: issues found
+  createdAt   DateTime @default(now())
+}

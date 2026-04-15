@@ -1,0 +1,59 @@
+name: QA Self-Improving Loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_score:
+        description: "Target quality score (default: 80)"
+        required: false
+        default: "80"
+      max_iterations:
+        description: "Max improvement iterations"
+        required: false
+        default: "10"
+  schedule:
+    - cron: "0 2 * * 1" # Every Monday at 2AM
+
+jobs:
+  evaluate-and-improve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run initial evaluation
+        run: npx tsx scripts/evaluate.ts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABASE_URL: "file:./dev.db"
+
+      - name: Run improvement loop
+        run: npx tsx scripts/improve.ts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABASE_URL: "file:./dev.db"
+          TARGET_SCORE: ${{ inputs.target_score || '80' }}
+          IMPROVE_MAX_ITERATIONS: ${{ inputs.max_iterations || '10' }}
+
+      - name: Push improvements
+        run: |
+          git config user.name "QA Bot"
+          git config user.email "qa-bot@github.com"
+          git push || echo "Nothing to push"
