@@ -20,6 +20,10 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+
+// Set working directory
+process.chdir(path.resolve(__dirname, ".."));
+
 import { evaluateSystem } from "../lib/evaluation/scorer";
 import { chat, extractJSON } from "../lib/ai/claude";
 import type { ScoreBreakdown } from "../lib/ai/types";
