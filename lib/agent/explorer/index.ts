@@ -48,6 +48,7 @@ export class SiteExplorer {
         authRequired: false,
         spa: false,
         technologies: [],
+        loginUrl: this.config.targetUrl,
       };
 
       // Step 1: Load main page
@@ -58,18 +59,33 @@ export class SiteExplorer {
       structure.spa = await this._detectSPA(page);
 
       // Step 3: Detect auth requirement
-      structure.authRequired = await this._detectAuth(page);
+      const hasLoginForm = await this._detectAuth(page);
+      structure.authRequired = hasLoginForm;
 
-      // Step 4: Collect pre-auth forms (login form)
+      // Step 4: Collect initial forms & record login URL
       const preAuthForms = await this._collectForms(page);
       structure.forms.push(...preAuthForms);
+      structure.loginUrl = page.url();
       structure.routes.push({ path: "/", title: structure.title, hasAuth: false, priority: 10, elements: await this._collectPageElements(page) });
 
-      // Step 5: Login if credentials provided
+      // Step 5: Login — only if site has a login form AND credentials are provided
       let workspaceId: string | null = null;
-      if (this.config.loginEmail && this.config.loginPassword) {
-        workspaceId = await this._login(page, this.config.loginEmail, this.config.loginPassword);
-        logger.info({ workspaceId }, "Explorer logged in, discovering authenticated routes");
+      const canLogin = hasLoginForm && !!this.config.loginEmail && !!this.config.loginPassword;
+      if (canLogin) {
+        const loginResult = await this._login(page, this.config.loginEmail!, this.config.loginPassword!);
+        workspaceId = loginResult.workspaceId;
+        if (loginResult.postLoginUrl) {
+          structure.postLoginUrl = loginResult.postLoginUrl;
+          structure.postLoginPattern = this._deriveUrlPattern(loginResult.postLoginUrl);
+          logger.info({ postLoginUrl: loginResult.postLoginUrl, pattern: structure.postLoginPattern }, "Logged in, authenticated routes will be explored");
+        } else {
+          logger.warn("Login may have failed — URL did not change from login page");
+        }
+      } else if (!hasLoginForm) {
+        logger.info("No login form detected — exploring as public/widget site");
+        // For sites with no login (e.g. widgets, public pages), record current URL as entry point
+        structure.postLoginUrl = page.url();
+        structure.postLoginPattern = undefined;
       }
 
       // Step 6: Discover routes — SPA-aware
@@ -78,27 +94,11 @@ export class SiteExplorer {
       visited.add("/");
 
       if (workspaceId) {
-        // For ZeroTalk-style SPAs: navigate to known route patterns using the extracted workspaceId
+        // SPA with workspace ID pattern (e.g. /w/:id/)
         await this._exploreSPARoutes(page, workspaceId, startUrl.origin, structure, visited, deadline);
       } else {
-        // Fallback: collect links from current page and visit them
-        const links = await this._collectLinks(page, startUrl.origin);
-        for (const link of links.slice(0, this.config.maxRoutes ?? 20)) {
-          if (Date.now() > deadline) break;
-          const linkPath = new URL(link).pathname;
-          if (visited.has(linkPath)) continue;
-          visited.add(linkPath);
-          try {
-            const routeInfo = await this._visitRoute(page, link);
-            if (routeInfo) {
-              structure.routes.push(routeInfo);
-              const pageForms = await this._collectForms(page);
-              structure.forms.push(...pageForms);
-            }
-          } catch (err) {
-            logger.debug({ link, err: String(err) }, "Route visit failed");
-          }
-        }
+        // Generic fallback: explore from current page (authenticated or public)
+        await this._exploreFromCurrentPage(page, startUrl.origin, structure, visited, deadline);
       }
 
       // Step 7: Detect technologies
@@ -134,53 +134,101 @@ export class SiteExplorer {
     return hasLoginForm || redirectedToLogin;
   }
 
-  /** Login and return the workspaceId extracted from the post-login URL (if applicable) */
-  private async _login(page: Page, email: string, password: string): Promise<string | null> {
-    // ZeroTalk: login is at root, not /login
-    const loginSelectors = [
-      'input[type="email"]',
-      'input[name="email"]',
-      'input[placeholder*="이메일"]',
-      'input[placeholder*="email" i]',
+  /** Login and return the post-login URL + any dynamic segment ID from the URL */
+  private async _login(
+    page: Page, email: string, password: string
+  ): Promise<{ workspaceId: string | null; postLoginUrl: string | null }> {
+    const loginUrl = page.url();
+
+    const emailSelectors = [
+      'input[type="email"]', 'input[name="email"]',
+      'input[placeholder*="이메일"]', 'input[placeholder*="email" i]',
     ];
     const pwSelectors = ['input[type="password"]', 'input[name="password"]'];
-    const submitSelectors = ['button[type="submit"]', 'button:has-text("로그인")', 'button:has-text("Login")'];
+    const submitSelectors = [
+      'button[type="submit"]', 'button:has-text("로그인")',
+      'button:has-text("Login")', 'button:has-text("Sign in")',
+    ];
 
-    for (const sel of loginSelectors) {
-      if ((await page.locator(sel).count()) > 0) {
-        await page.fill(sel, email);
-        break;
-      }
+    for (const sel of emailSelectors) {
+      if ((await page.locator(sel).count()) > 0) { await page.fill(sel, email); break; }
     }
     for (const sel of pwSelectors) {
-      if ((await page.locator(sel).count()) > 0) {
-        await page.fill(sel, password);
-        break;
-      }
+      if ((await page.locator(sel).count()) > 0) { await page.fill(sel, password); break; }
     }
     for (const sel of submitSelectors) {
-      if ((await page.locator(sel).count()) > 0) {
-        await page.click(sel);
-        break;
-      }
+      if ((await page.locator(sel).count()) > 0) { await page.click(sel); break; }
     }
 
-    // Wait for SPA navigation after login (URL changes from login page)
+    // Wait for URL to change from login page (works for both SPA and MPA)
     try {
       await page.waitForFunction(
-        () => !window.location.pathname.match(/^\/?$/),
-        { timeout: 15_000 }
+        (loginHref: string) => window.location.href !== loginHref,
+        loginUrl,
+        { timeout: 20_000 }
       );
+      await page.waitForTimeout(1500); // let SPA fully render after navigation
     } catch {
-      await page.waitForLoadState("networkidle");
+      await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
     }
 
     const currentUrl = page.url();
-    logger.info({ url: currentUrl }, "Post-login URL");
+    logger.info({ from: loginUrl, to: currentUrl }, "Post-login URL captured");
 
-    // Extract workspaceId for ZeroTalk-style SPAs: /w/:workspaceId/...
-    const match = currentUrl.match(/\/w\/([^/?#]+)/);
-    return match ? match[1] : null;
+    // If URL didn't change, login likely failed
+    if (currentUrl === loginUrl || new URL(currentUrl).pathname === new URL(loginUrl).pathname) {
+      logger.warn("Login appears to have failed — URL unchanged");
+      return { workspaceId: null, postLoginUrl: null };
+    }
+
+    // Extract any dynamic segment ID from URL (e.g. /w/:id/, /workspace/:id/, /app/:id/)
+    const idMatch = currentUrl.match(/\/(?:w|workspace|app|org|team|project)\/([^/?#]+)/);
+    return {
+      workspaceId: idMatch ? idMatch[1] : null,
+      postLoginUrl: currentUrl,
+    };
+  }
+
+  /** Derive a glob pattern from a concrete URL for use in waitForUrl steps */
+  private _deriveUrlPattern(url: string): string {
+    try {
+      const { pathname } = new URL(url);
+      // Replace UUID-like or numeric segments with **
+      const pattern = pathname
+        .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "/**")
+        .replace(/\/\d{4,}/g, "/**")
+        .replace(/\/[a-zA-Z0-9_-]{20,}/g, "/**"); // long opaque IDs
+      // If nothing replaced, just use the first two path segments
+      if (!pattern.includes("**")) {
+        const parts = pathname.split("/").slice(0, 3);
+        return `**${parts.join("/")}/**`;
+      }
+      return `**${pattern}**`;
+    } catch {
+      return "**";
+    }
+  }
+
+  /** Explore routes from the currently loaded (authenticated) page via link collection */
+  private async _exploreFromCurrentPage(
+    page: Page, origin: string, structure: SiteStructure, visited: Set<string>, deadline: number
+  ): Promise<void> {
+    const links = await this._collectLinks(page, origin);
+    for (const link of links.slice(0, this.config.maxRoutes ?? 20)) {
+      if (Date.now() > deadline) break;
+      const linkPath = new URL(link).pathname;
+      if (visited.has(linkPath)) continue;
+      visited.add(linkPath);
+      try {
+        const routeInfo = await this._visitRoute(page, link);
+        if (routeInfo) {
+          structure.routes.push(routeInfo);
+          structure.forms.push(...await this._collectForms(page));
+        }
+      } catch (err) {
+        logger.debug({ link, err: String(err) }, "Route visit failed");
+      }
+    }
   }
 
   /** Navigate through known SPA route patterns using the workspaceId */

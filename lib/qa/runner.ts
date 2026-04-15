@@ -317,27 +317,34 @@ export class QARunner {
           const url = step.value?.startsWith("http")
             ? step.value
             : `${this.config.baseUrl}${step.value ?? ""}`;
-          await page.goto(url, { waitUntil: "domcontentloaded" });
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeout ?? 30_000 });
+          // After navigation, give SPA time to re-render (short idle wait)
+          await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
           break;
         }
 
         case "click": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000);
+          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000);
           await loc.scrollIntoViewIfNeeded();
           await loc.click();
-          await page.waitForLoadState("domcontentloaded");
+          // SPA navigation: wait for network to settle, fall back to domcontentloaded
+          await page.waitForLoadState("networkidle", { timeout: 6_000 }).catch(() =>
+            page.waitForLoadState("domcontentloaded", { timeout: 3_000 }).catch(() => {})
+          );
           break;
         }
 
         case "fill": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000);
+          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000);
           await loc.fill(step.value ?? "");
           break;
         }
 
         case "assert": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000);
-          await loc.waitFor({ state: "visible", timeout: step.timeout ?? 10_000 });
+          // Use step timeout or default 15s (ZeroTalk SPA can be slow to render)
+          const assertTimeout = step.timeout ?? 15_000;
+          const loc = await resolveSelector(page, step.target!, assertTimeout);
+          await loc.waitFor({ state: "visible", timeout: assertTimeout });
           if (step.value) {
             const text = await loc.textContent();
             if (!text?.includes(step.value)) {

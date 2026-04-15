@@ -1,4 +1,4 @@
-import type { QAScenario, SiteStructure } from "./types";
+import type { SiteStructure } from "./types";
 
 // ─── System Prompts ───────────────────────────────────────────
 
@@ -38,21 +38,35 @@ Given a site structure, generate comprehensive test scenarios covering:
 
 CRITICAL RULES — violating these makes a scenario worthless:
 1. NEVER use placeholder credentials like "user@example.com" or "ValidPassword123". Use ONLY the real credentials provided in the prompt.
-2. Every auth scenario MUST include a "waitForUrl" step after login submit to verify the redirect actually happened.
-3. Every scenario MUST include at least one "assert" or "waitForUrl" step. Screenshot-only scenarios are forbidden.
-4. For error scenarios (wrong password, empty fields): assert that an error/alert element is visible.
-5. Available actions: navigate, click, fill, assert, wait, screenshot, scroll, hover, press, evaluate, waitForUrl.
-6. "waitForUrl" value must be a glob pattern like "**/w/**" or the full URL.
-7. "assert" target should check a URL-verifiable element or visible error text.
+2. Every auth scenario MUST include a "waitForUrl" step (timeout: 25000) after login submit to verify the redirect actually happened.
+3. Every scenario MUST include at least TWO verification steps (assert or waitForUrl). Screenshot-only or single-step scenarios are FORBIDDEN.
+4. All "waitForUrl" steps MUST have timeout: 25000. All "assert" steps MUST have timeout: 15000.
+5. For error scenarios (wrong password, empty fields): add "wait" 2000ms then assert the error element OR login form is still visible.
+6. After every page navigation or SPA route change, add "wait" at least 2000ms before asserting to allow SPA rendering.
+7. Available actions: navigate, click, fill, assert, wait, screenshot, scroll, hover, press, evaluate, waitForUrl.
+8. "waitForUrl" value must be a glob pattern like "**/dashboard**" or the full URL pattern.
 
 SELECTOR RULES — wrong selectors cause 100% failure rate:
-- Email inputs: ALWAYS use css "input[type='email']", NOT input[name='...']
-- Password inputs: ALWAYS use css "input[type='password']", NOT input[name='...']
-- If a field is described as 'input[placeholder="X"]' in the site structure, use that EXACT string as the css selector
-- NEVER invent input[name='Korean text'] — Korean text in field descriptions is the placeholder, not the name attribute
-- Submit buttons: use css "button[type='submit']"
-- Failed login verification: assert that login form is still visible using css "input[type='email']" or "input[type='password']" (if still on login page = login failed). Do NOT rely on app-specific error CSS classes.
-- If you need to verify an error toast/alert, use wait 2000 then assert "input[type='email']" still visible as the login-failed proof.
+- Email inputs: ALWAYS use css "input[type='email']"
+- Password inputs: ALWAYS use css "input[type='password']"
+- Submit buttons: ALWAYS use css "button[type='submit']"
+- If the site structure lists a field as 'input[placeholder="X"]', use that EXACT string as the css selector
+- NEVER invent input[name='non-english text'] — non-English field labels are the placeholder, not the name attribute
+- Failed login verification: assert css "input[type='password']" is still visible (= still on login page = login failed)
+- UNIVERSAL PAGE-LOADED CHECK: assert css "body" with timeout 15000 — "body" ALWAYS exists on any HTML page, use this as the guaranteed page-loaded assertion
+- "main" may NOT exist in SPAs — NEVER use "main" as a selector. Use "body" instead.
+- Other safe selectors (if the site structure shows they exist): "nav", "header", "h1"
+
+SPA HANDLING:
+- For SPAs (React, Vue, Next.js): always use waitForUrl with "commit" timing, not "load"
+- If navigating to a dynamic URL that includes IDs: use evaluate to extract the current ID from window.location then construct the target URL
+- Add wait: 2000 after any evaluate that changes window.location.href
+- Use "assert" with target css "body" as a basic page-loaded check (NEVER use "main" — it may not exist)
+
+SECURITY SCENARIO RULES:
+- Unauthorized access scenarios: navigate to protected route WITHOUT login → add wait 3000 → assert css "body" → take screenshot (documents what the app shows for unauthorized access; do NOT assert input[type='email'] since the app may not redirect to login)
+- XSS scenarios: only generate if the site structure shows forms with text inputs. Fill the input with XSS payload → assert css "body" → screenshot. Do NOT assert alerts or popups.
+- If the site has NO login form (public/widget site), do NOT generate auth or security scenarios — generate UI and navigation scenarios only.
 
 Output ONLY valid JSON array. No explanations.`;
 
@@ -243,8 +257,16 @@ export function buildScenarioGenPrompt(
   password: "${credentials.password}"\n`
     : "";
 
+  const loginContext = structure.postLoginUrl
+    ? `\nURL CONTEXT (critical for waitForUrl patterns):
+  Login URL: ${structure.loginUrl ?? structure.url}
+  Post-login URL (actual): ${structure.postLoginUrl}
+  Post-login glob pattern: ${structure.postLoginPattern ?? `**${new URL(structure.postLoginUrl).pathname.split("/").slice(0, 3).join("/")}/**`}
+  → Use this EXACT glob pattern for all "waitForUrl" steps after login\n`
+    : "";
+
   return `Generate comprehensive QA test scenarios for this site.
-${credSection}
+${credSection}${loginContext}
 Site Analysis:
 ${JSON.stringify(structure, null, 2)}
 
@@ -253,15 +275,27 @@ Requirements:
 2. Test auth flows FIRST (highest priority)
 3. Include happy path + at least 2 edge cases per critical flow
 4. Use multi-fallback selectors: testId > ariaLabel > text > css
-5. After every login submit: add a "waitForUrl" step with value "**/w/**" to confirm redirect
-6. For failed login tests: add an "assert" step checking for a visible error message (css: "[role='alert'], .error, [class*='error']")
-7. Mark payment/auth flows as "critical" priority
-8. Generate 10-20 scenarios total
-9. Every scenario MUST contain at least one assert or waitForUrl step
+5. After every login submit: add a "waitForUrl" step (timeout: 25000) to confirm redirect
+6. For failed login tests: add wait:2000 then assert login form still visible (css: "input[type='password']")
+7. Mark auth/payment flows as "critical" priority
+8. Generate 12-15 scenarios total
+9. Every scenario MUST contain at least TWO verification steps (assert or waitForUrl)
+10. All waitForUrl timeout: 25000. All assert timeout: 15000
+11. After any navigation that changes the URL (navigate, evaluate with location.href), add wait:2000
+12. Include negative tests (invalid input, empty fields) tagged "negative-test"
+13. For security: generate at most ONE scenario — navigate to protected route without login → wait 3000 → assert css "body" → screenshot
+
+FORM FILL RULES (critical — prevents selector failures):
+- ONLY generate "fill" steps for form fields that EXPLICITLY appear in the site structure's "forms[].fields" array
+- If a route has NO associated form in the site structure, do NOT invent fill steps for that route
+- For pages like settings/profile where a form may exist but wasn't captured: use assert + screenshot to verify the page loaded — do NOT guess field selectors
+- SAFE PAGE-LOADED ASSERTION: assert css "body" (timeout: 15000) — "body" is GUARANTEED to exist on every HTML page. USE THIS instead of "main", "nav", or "header" which may not exist in all SPAs.
+- NEVER use "main" as a CSS selector — many SPAs do not have a <main> element
+- For settings/admin pages with no form data: navigate → wait 2000 → assert css "body" → screenshot is a COMPLETE and VALID scenario
 
 Available actions: navigate, click, fill, assert, wait, screenshot, scroll, hover, press, evaluate, waitForUrl
 
-Return a JSON array of QAScenario objects:
+Return a JSON array of QAScenario objects. Each step MUST have timeout set for assert/waitForUrl:
 {
   id: string,
   name: string,

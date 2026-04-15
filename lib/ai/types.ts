@@ -57,6 +57,9 @@ export interface SiteStructure {
   authRequired: boolean;
   spa: boolean;
   technologies: string[];
+  loginUrl?: string;       // URL of the login page (base URL or /login)
+  postLoginUrl?: string;   // Actual URL after successful login (for waitForUrl patterns)
+  postLoginPattern?: string; // Glob pattern derived from postLoginUrl e.g. "**/w/**"
 }
 
 export interface RouteInfo {
