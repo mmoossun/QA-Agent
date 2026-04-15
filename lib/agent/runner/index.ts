@@ -18,6 +18,9 @@ export interface AgentRunConfig {
   timeBudgetMs?: number;
   scenarioCategories?: string[];
   onProgress?: (status: AgentStatus) => void;
+  customPrompt?: string;          // natural language user instructions
+  directScenarios?: QAScenario[]; // already-complete scenarios from uploaded file
+  scenarioHints?: string[];       // text descriptions from uploaded file for AI to expand
 }
 
 export interface AgentStatus {
@@ -81,12 +84,15 @@ export class AgentRunner {
         structure,
         this.config.targetUrl,
         this.config.scenarioCategories,
-        { email: this.config.loginEmail, password: this.config.loginPassword }
+        { email: this.config.loginEmail, password: this.config.loginPassword },
+        { customPrompt: this.config.customPrompt, scenarioHints: this.config.scenarioHints }
       );
-      scenarios = scenarios.slice(0, this.config.maxScenarios);
+      // Merge: file scenarios run in addition to AI-generated (not counted against maxScenarios)
+      const direct = this.config.directScenarios ?? [];
+      scenarios = [...direct, ...scenarios.slice(0, this.config.maxScenarios)];
       this.emit({
         stage: "generating",
-        message: `Generated ${scenarios.length} test scenarios`,
+        message: `Generated ${scenarios.length} test scenarios${direct.length ? ` (${direct.length} from file)` : ""}`,
         progress: 45,
         data: scenarios,
       });

@@ -13,7 +13,8 @@ export class ScenarioGenerator {
     structure: SiteStructure,
     targetUrl: string,
     categories?: string[],
-    credentials?: { email?: string; password?: string }
+    credentials?: { email?: string; password?: string },
+    options?: { customPrompt?: string; scenarioHints?: string[] }
   ): Promise<QAScenario[]> {
     logger.info({ url: targetUrl, routes: structure.routes.length, categories }, "Generating scenarios");
 
@@ -21,7 +22,15 @@ export class ScenarioGenerator {
       ? `\n\nFOCUS CATEGORIES: Generate scenarios primarily for these categories: ${categories.join(", ")}. Deprioritize or skip other categories.`
       : "";
 
-    const prompt = buildScenarioGenPrompt(structure, credentials) + categoryHint;
+    const hintsSection = options?.scenarioHints?.length
+      ? `\n\nADDITIONAL TEST CASES TO COVER (from uploaded scenario sheet — generate proper Playwright steps for each):\n${options.scenarioHints.map((h, i) => `${i + 1}. ${h}`).join("\n")}`
+      : "";
+
+    const customSection = options?.customPrompt?.trim()
+      ? `\n\nUSER INSTRUCTIONS (follow these specific requirements):\n${options.customPrompt.trim()}`
+      : "";
+
+    const prompt = buildScenarioGenPrompt(structure, credentials) + categoryHint + hintsSection + customSection;
 
     const response = await chat(
       [{ role: "user", content: prompt }],

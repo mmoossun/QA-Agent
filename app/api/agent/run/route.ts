@@ -14,6 +14,9 @@ const RequestSchema = z.object({
   loginPassword: z.string().optional(),
   maxScenarios: z.number().min(1).max(30).default(15),
   scenarioCategories: z.array(z.string()).optional(),
+  customPrompt: z.string().max(2000).optional(),
+  directScenarios: z.array(z.any()).optional(),
+  scenarioHints: z.array(z.string()).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -28,7 +31,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories } = parsed.data;
+    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories, customPrompt, directScenarios, scenarioHints } = parsed.data;
 
     // Server-Sent Events for real-time progress
     const encoder = new TextEncoder();
@@ -45,6 +48,9 @@ export async function POST(req: NextRequest) {
             loginPassword,
             maxScenarios,
             scenarioCategories,
+            customPrompt,
+            directScenarios: directScenarios as import("@/lib/ai/types").QAScenario[] | undefined,
+            scenarioHints,
             onProgress: (status: AgentStatus) => {
               send({ type: "progress", ...status });
             },
