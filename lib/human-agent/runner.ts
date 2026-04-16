@@ -1,10 +1,12 @@
 /**
- * Human-mode Agent Runner — Hybrid Vision Architecture
+ * Human-mode Agent Runner — Hybrid Vision Architecture v2
  *
- * Step 1a — Perception  : Qwen3-VL  → screenshot → screen state / layout / errors (Korean OCR)
- * Step 1b — DOM Extract : Playwright → real interactive elements with guaranteed selectors
- * Step 2  — Planning    : GPT-4o    → Vision context + DOM elements + history → next action JSON
- * Step 3  — Execution   : Playwright → multi-strategy fallback click/fill
+ * Step 1a — Perception    : Qwen3-VL  → screenshot → screen state / errors / layout (Korean OCR)
+ * Step 1b — A11y Snapshot : Playwright accessibility.snapshot() → compact @ref element list
+ * Step 2  — Planning      : GPT-4o    → Qwen context + @refs → next action JSON
+ * Step 3  — Execution     : Playwright getByRole / getByLabel → multi-strategy fallback
+ * Step 3b — Reflection    : failed action error is injected into next planning prompt
+ *           Stall guard   : same action repeated 3× → force scroll/wait
  */
 
 import { chromium, type Browser, type Page } from "playwright";
@@ -26,7 +28,7 @@ export type HumanAction =
 
 export interface ActionDecision {
   action: HumanAction;
-  target?: string;
+  target?: string;   // @eN ref or URL or key
   value?: string;
   description: string;
   observation: string;
@@ -66,47 +68,57 @@ export interface HumanAgentConfig {
   onStep?: (step: HumanStep) => void;
 }
 
-interface DOMElement {
-  type: string;
-  label: string;
-  selector: string;
-  currentValue?: string;
+// ─── A11y Ref ─────────────────────────────────────────────────
+interface A11yRef {
+  ref: string;       // @e1, @e2, ...
+  role: string;      // button | link | textbox | checkbox | ...
+  name: string;      // accessible name (label / aria-label / text)
+  value?: string;    // current input value
+  checked?: boolean;
+  expanded?: boolean;
 }
+
+const INTERACTIVE_ROLES = new Set([
+  "button", "link", "textbox", "searchbox", "combobox",
+  "checkbox", "radio", "switch", "slider", "spinbutton",
+  "menuitem", "menuitemcheckbox", "menuitemradio",
+  "tab", "option", "listbox", "treeitem",
+]);
 
 // ─── GPT-4o Planning System Prompt ───────────────────────────
 const PLANNING_SYSTEM = `You are an expert QA tester operating a web browser.
 
-Each step you receive two inputs:
-  1. REAL_DOM_ELEMENTS — interactive elements queried directly from the live DOM.
-     These selectors are GUARANTEED to exist right now. Always use these for click/fill targets.
-  2. SCREEN_DESCRIPTION — visual analysis from Qwen3-VL (Korean OCR).
-     Use this to understand page state, errors, messages, and overall flow.
-     NEVER use selectors from SCREEN_DESCRIPTION — they may be inaccurate.
+Each step you receive:
+  1. A11Y_REFS — interactive elements from the live accessibility tree.
+     Each has a short @eN reference. Use ONLY these refs as "target" for click/fill.
+  2. SCREEN_DESCRIPTION — Korean OCR + visual context from Qwen3-VL.
+     Use this to understand page state, errors, messages, flow.
+     Never use selectors or refs from SCREEN_DESCRIPTION — only A11Y_REFS refs are valid.
 
-Decision rules:
-- Use selectors from REAL_DOM_ELEMENTS only.
-- If the element you need is not listed, use scroll/wait and it will appear next step.
-- If goal is achieved and verified, use done.
-- If a clear bug or blocker exists, use fail.
+Rules:
+- "target" must be an @eN ref from A11Y_REFS (or a URL for navigate).
+- If the element you need is not in A11Y_REFS, use scroll/wait first.
+- If the previous action FAILED, try a completely different approach.
+- Detect and report real bugs (wrong error messages, missing features, broken flows).
 
-Respond with ONLY a raw JSON object (no markdown, no code fences):
+Respond with ONLY raw JSON (no markdown, no code fences):
 {
   "action": "click" | "fill" | "navigate" | "wait" | "scroll" | "press" | "done" | "fail",
-  "target": "selector from REAL_DOM_ELEMENTS",
-  "value": "text to type / URL / key name / scroll pixels",
+  "target": "@eN ref from A11Y_REFS  |  full URL for navigate",
+  "value": "text to type  |  ms to wait  |  pixels to scroll  |  key name",
   "description": "what you are doing and why",
   "observation": "brief summary of current screen state"
 }
 
 Action guide:
-- click    : target = selector from REAL_DOM_ELEMENTS
-- fill     : target = input selector from REAL_DOM_ELEMENTS, value = text to enter
-- navigate : value = full URL
+- click    : target = @eN (button or link)
+- fill     : target = @eN (textbox/combobox), value = text to enter
+- navigate : value = full URL (no target needed)
 - wait     : value = milliseconds e.g. "2000"
 - scroll   : value = pixels to scroll down e.g. "500"
 - press    : value = Enter | Tab | Escape
-- done     : goal fully verified
-- fail     : bug found or goal is impossible`;
+- done     : goal fully achieved and verified
+- fail     : real bug found or goal is impossible — describe clearly`;
 
 // ─── Runner ────────────────────────────────────────────────────
 export class HumanAgentRunner {
@@ -116,6 +128,13 @@ export class HumanAgentRunner {
   private sessionId: string;
   private steps: HumanStep[] = [];
   private actionHistory: string[] = [];
+
+  // Reflection & stall detection state
+  private lastFailureError: string | null = null;
+  private recentActionKeys: string[] = []; // last 3 "action:target" strings
+
+  // Current step's ref map (rebuilt each step)
+  private refMap: Map<string, A11yRef> = new Map();
 
   constructor(config: HumanAgentConfig) {
     this.config = config;
@@ -149,22 +168,37 @@ export class HumanAgentRunner {
       for (let step = 1; step <= maxSteps; step++) {
         const stepStart = Date.now();
 
-        // ── Step 1: Screenshot + Perception + DOM (parallel) ──
+        // ── Stall guard: force scroll if stuck ────────────────
+        if (this._isStalled()) {
+          logger.warn("Stall detected — injecting scroll");
+          await this.page.evaluate(() => window.scrollBy(0, 400));
+          await this.page.waitForTimeout(600);
+          this.recentActionKeys = [];
+        }
+
+        // ── Step 1: Screenshot + Qwen perception + A11y (parallel)
         const { base64, publicPath } = await this._screenshot(`step${step}`);
         const percStart = Date.now();
-        const [perception, domElements] = await Promise.all([
+        const [perception, a11yRefs] = await Promise.all([
           perceiveScreen(base64, this.page.url()),
-          this._extractDOMElements(),
+          this._snapshotA11y(),
         ]);
         const perceptionMs = Date.now() - percStart;
 
         // ── Step 2: GPT-4o Planning ────────────────────────────
         const planStart = Date.now();
-        const decision = await this._plan(perception, domElements, step, maxSteps);
+        const decision = await this._plan(perception, a11yRefs, step, maxSteps);
         const planningMs = Date.now() - planStart;
 
-        // ── Step 3: Playwright Execution ───────────────────────
-        const { success, error } = await this._execute(decision, domElements);
+        // Track action key for stall detection
+        this.recentActionKeys.push(`${decision.action}:${decision.target ?? ""}`);
+        if (this.recentActionKeys.length > 3) this.recentActionKeys.shift();
+
+        // ── Step 3: Execution ──────────────────────────────────
+        const { success, error } = await this._execute(decision);
+
+        // Reflection: store failure for next planning step
+        this.lastFailureError = success ? null : (error ?? "unknown error");
 
         const humanStep: HumanStep = {
           stepNumber: step,
@@ -182,7 +216,8 @@ export class HumanAgentRunner {
         this.config.onStep?.(humanStep);
 
         this.actionHistory.push(
-          `Step ${step} [${decision.action}]: ${decision.description}${error ? ` ← FAILED: ${error}` : " ✓"}`
+          `Step ${step} [${decision.action}${decision.target ? " " + decision.target : ""}]: ${decision.description}` +
+          (error ? ` ← FAILED: ${error}` : " ✓")
         );
 
         if (decision.action === "done") { status = "done"; summary = decision.description; break; }
@@ -209,90 +244,65 @@ export class HumanAgentRunner {
     }
   }
 
-  // ── Extract real interactive elements from the live DOM ──────
-  private async _extractDOMElements(): Promise<DOMElement[]> {
+  // ── A11y snapshot via CDP → compact @ref list ────────────
+  private async _snapshotA11y(): Promise<A11yRef[]> {
+    this.refMap.clear();
+    const refs: A11yRef[] = [];
+    let counter = 1;
+
+    type CDPAXNode = {
+      nodeId: string;
+      ignored?: boolean;
+      role?: { value: string };
+      name?: { value: string };
+      value?: { value: string };
+      properties?: Array<{ name: string; value: { value: unknown } }>;
+      childIds?: string[];
+    };
+
     try {
-      return await this.page!.evaluate((): DOMElement[] => {
-        const results: DOMElement[] = [];
-        const seen = new Set<string>();
+      const client = await this.page!.context().newCDPSession(this.page!);
+      const { nodes } = await client.send("Accessibility.getFullAXTree") as { nodes: CDPAXNode[] };
+      await client.detach();
 
-        function bestSelector(el: Element): string {
-          if (el.id) return `#${CSS.escape(el.id)}`;
-          const tag = el.tagName.toLowerCase();
-          const ariaLabel = el.getAttribute("aria-label");
-          if (ariaLabel) return `[aria-label="${ariaLabel}"]`;
-          const placeholder = el.getAttribute("placeholder");
-          if (placeholder) return `${tag}[placeholder="${placeholder}"]`;
-          const name = el.getAttribute("name");
-          if (name) return `${tag}[name="${name}"]`;
-          const type = (el as HTMLInputElement).type;
-          if (type && type !== "text") return `${tag}[type="${type}"]`;
-          // nth-of-type as last resort
-          const parent = el.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
-            const idx = siblings.indexOf(el as HTMLElement);
-            if (idx >= 0) return `${tag}:nth-of-type(${idx + 1})`;
-          }
-          return tag;
-        }
+      for (const node of nodes) {
+        if (node.ignored) continue;
+        const role = node.role?.value?.toLowerCase() ?? "";
+        const name = (node.name?.value ?? "").trim();
 
-        function getLabel(el: Element): string {
-          return (
-            el.getAttribute("aria-label") ||
-            el.getAttribute("placeholder") ||
-            el.getAttribute("title") ||
-            el.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) ||
-            el.getAttribute("name") ||
-            ""
-          );
-        }
+        if (!INTERACTIVE_ROLES.has(role)) continue;
 
-        function push(type: string, el: Element, extra?: { currentValue?: string }) {
-          const label = getLabel(el);
-          const selector = bestSelector(el);
-          if (seen.has(selector)) return;
-          seen.add(selector);
-          results.push({ type, label, selector, ...extra });
-        }
+        // Skip disabled elements
+        const disabled = node.properties?.find(p => p.name === "disabled")?.value?.value;
+        if (disabled === true) continue;
 
-        // Buttons (skip disabled)
-        document.querySelectorAll(
-          'button:not([disabled]), [role="button"]:not([disabled]), input[type="submit"], input[type="button"]'
-        ).forEach(el => push("button", el));
+        const value = node.value?.value ? String(node.value.value) : undefined;
+        const checked = node.properties?.find(p => p.name === "checked")?.value?.value;
+        const expanded = node.properties?.find(p => p.name === "expanded")?.value?.value;
 
-        // Inputs & textareas (skip hidden/disabled)
-        document.querySelectorAll(
-          'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([disabled]), textarea:not([disabled])'
-        ).forEach(el => {
-          const inp = el as HTMLInputElement;
-          push(`input[${inp.type || "text"}]`, el, { currentValue: inp.value || undefined });
-        });
-
-        // Selects
-        document.querySelectorAll("select:not([disabled])").forEach(el => push("select", el));
-
-        // Links (cap at 40, skip blank/hash hrefs)
-        let linkCount = 0;
-        document.querySelectorAll("a[href]").forEach(el => {
-          if (linkCount >= 40) return;
-          const href = el.getAttribute("href") ?? "";
-          if (!href || href === "#") return;
-          const label = getLabel(el);
-          if (!label) return;
-          const selector = el.id ? `#${CSS.escape(el.id)}` : `a[href="${href}"]`;
-          if (seen.has(selector)) return;
-          seen.add(selector);
-          results.push({ type: "link", label, selector });
-          linkCount++;
-        });
-
-        return results;
-      });
+        const ref: A11yRef = {
+          ref: `@e${counter++}`,
+          role,
+          name,
+          value,
+          checked: typeof checked === "boolean" ? checked : undefined,
+          expanded: typeof expanded === "boolean" ? expanded : undefined,
+        };
+        refs.push(ref);
+        this.refMap.set(ref.ref, ref);
+      }
     } catch (e) {
-      logger.warn({ e }, "DOM extraction failed");
-      return [];
+      logger.warn({ e }, "A11y CDP snapshot failed");
     }
+
+    return refs.slice(0, 60); // cap to avoid overwhelming GPT-4o
+  }
+
+  // ── Stall detection ────────────────────────────────────────
+  private _isStalled(): boolean {
+    if (this.recentActionKeys.length < 3) return false;
+    const [a, b, c] = this.recentActionKeys;
+    return a === b && b === c && a !== "scroll:" && a !== "wait:";
   }
 
   private async _tryLogin(): Promise<void> {
@@ -325,7 +335,7 @@ export class HumanAgentRunner {
 
   private async _plan(
     perception: string,
-    domElements: DOMElement[],
+    a11yRefs: A11yRef[],
     stepNum: number,
     maxSteps: number
   ): Promise<ActionDecision> {
@@ -345,24 +355,31 @@ export class HumanAgentRunner {
       ? `\n\nAdditional instructions: ${this.config.customPrompt}`
       : "";
 
-    const domText = domElements.length
-      ? domElements
-          .map(e =>
-            `- [${e.type}] "${e.label}" → ${e.selector}` +
-            (e.currentValue ? ` (current: "${e.currentValue}")` : "")
-          )
-          .join("\n")
-      : "(no interactive elements found — consider scroll or wait)";
+    // Reflection: inject failure context
+    const reflectionText = this.lastFailureError
+      ? `\n\n⚠️ PREVIOUS ACTION FAILED: "${this.lastFailureError}"\nTry a completely different approach — do not repeat the same action.`
+      : "";
+
+    // Compact @ref list
+    const refsText = a11yRefs.length
+      ? a11yRefs.map(r => {
+          let line = `${r.ref} [${r.role}] "${r.name}"`;
+          if (r.value) line += ` (value: "${r.value}")`;
+          if (r.checked !== undefined) line += ` (checked: ${r.checked})`;
+          if (r.expanded !== undefined) line += ` (expanded: ${r.expanded})`;
+          return line;
+        }).join("\n")
+      : "(no interactive elements — try scroll or wait)";
 
     const userMessage = [
       `Goal: "${this.config.goal}"${categoryText}`,
       `Current URL: ${this.page?.url()}`,
-      `Step: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}`,
+      `Step: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}${reflectionText}`,
       "",
-      "--- REAL_DOM_ELEMENTS (guaranteed selectors — use ONLY these for target) ---",
-      domText,
+      "--- A11Y_REFS (use ONLY these @eN refs as target) ---",
+      refsText,
       "",
-      "--- SCREEN_DESCRIPTION from Qwen3-VL (visual context, Korean OCR — DO NOT use its selectors) ---",
+      "--- SCREEN_DESCRIPTION from Qwen3-VL (visual context + Korean OCR — DO NOT use its element refs) ---",
       perception,
       "",
       "Decide the next action.",
@@ -384,10 +401,7 @@ export class HumanAgentRunner {
     }
   }
 
-  private async _execute(
-    d: ActionDecision,
-    domElements: DOMElement[]
-  ): Promise<{ success: boolean; error?: string }> {
+  private async _execute(d: ActionDecision): Promise<{ success: boolean; error?: string }> {
     const p = this.page!;
     try {
       switch (d.action) {
@@ -397,15 +411,15 @@ export class HumanAgentRunner {
           break;
 
         case "click": {
-          const clicked = await this._robustClick(p, d.target ?? "", d.value ?? d.description, domElements);
-          if (!clicked) throw new Error(`클릭 대상 없음: ${d.target}`);
+          const clicked = await this._resolveAndClick(p, d.target ?? "");
+          if (!clicked) throw new Error(`클릭 실패: ${d.target}`);
           await p.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => {});
           break;
         }
 
         case "fill": {
-          const filled = await this._robustFill(p, d.target ?? "input", d.value ?? "");
-          if (!filled) throw new Error(`입력 대상 없음: ${d.target}`);
+          const filled = await this._resolveAndFill(p, d.target ?? "", d.value ?? "");
+          if (!filled) throw new Error(`입력 실패: ${d.target}`);
           break;
         }
 
@@ -414,7 +428,7 @@ export class HumanAgentRunner {
           break;
 
         case "scroll":
-          await p.evaluate((y) => window.scrollTo({ top: y, behavior: "smooth" }), Number(d.value ?? 500));
+          await p.evaluate((y) => window.scrollBy({ top: y, behavior: "smooth" }), Number(d.value ?? 500));
           await p.waitForTimeout(400);
           break;
 
@@ -434,74 +448,63 @@ export class HumanAgentRunner {
   }
 
   /**
-   * Click fallback chain:
-   * 1. Exact DOM selector (from REAL_DOM_ELEMENTS)
-   * 2. aria-label parsed from selector string
-   * 3. getByRole("button") with hint text
-   * 4. getByText with hint text
-   * 5. getByRole("link") with hint text
+   * Click resolution chain (A11y-first):
+   * 1. @eN ref → getByRole(role, {name}) from a11y tree
+   * 2. getByRole("button", {name: hint})
+   * 3. getByRole("link", {name: hint})
+   * 4. getByText(hint)
+   * 5. getByLabel(hint)
    */
-  private async _robustClick(
-    p: Page,
-    selector: string,
-    hint: string,
-    _domElements: DOMElement[]
-  ): Promise<boolean> {
-    // 1. Exact selector
-    if (selector) {
+  private async _resolveAndClick(p: Page, target: string): Promise<boolean> {
+    // 1. Resolve @eN ref via a11y map
+    if (target.startsWith("@e")) {
+      const ref = this.refMap.get(target);
+      if (ref) {
+        try {
+          const loc = p.getByRole(ref.role as Parameters<typeof p.getByRole>[0], {
+            name: ref.name,
+            exact: false,
+          });
+          if (await loc.count() > 0) {
+            await loc.first().click({ timeout: 6_000 });
+            return true;
+          }
+        } catch { /* fall through */ }
+      }
+    }
+
+    // Derive hint text from target string or ref name
+    const hint = (this.refMap.get(target)?.name) ?? target;
+
+    // 2. getByRole button
+    if (hint) {
       try {
-        const loc = p.locator(selector).first();
-        if (await loc.count() > 0) {
-          await loc.click({ timeout: 5_000 });
-          return true;
-        }
+        const loc = p.getByRole("button", { name: hint, exact: false });
+        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
       } catch { /* fall through */ }
     }
 
-    // 2. aria-label parsed from selector
-    const ariaMatch = selector.match(/\[aria-label="([^"]+)"\]/);
-    if (ariaMatch) {
+    // 3. getByRole link
+    if (hint) {
       try {
-        const loc = p.getByLabel(ariaMatch[1]);
-        if (await loc.count() > 0) {
-          await loc.first().click({ timeout: 5_000 });
-          return true;
-        }
-      } catch { /* fall through */ }
-    }
-
-    const hintText = hint || selector;
-
-    // 3. getByRole button
-    if (hintText) {
-      try {
-        const loc = p.getByRole("button", { name: hintText, exact: false });
-        if (await loc.count() > 0) {
-          await loc.first().click({ timeout: 5_000 });
-          return true;
-        }
+        const loc = p.getByRole("link", { name: hint, exact: false });
+        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
       } catch { /* fall through */ }
     }
 
     // 4. getByText
-    if (hintText) {
+    if (hint) {
       try {
-        const loc = p.getByText(hintText, { exact: false });
-        if (await loc.count() > 0) {
-          await loc.first().click({ timeout: 5_000 });
-          return true;
-        }
+        const loc = p.getByText(hint, { exact: false });
+        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
       } catch { /* fall through */ }
     }
 
-    // 5. getByRole link
-    if (hintText) {
+    // 5. getByLabel
+    if (hint) {
       try {
-        const loc = p.getByRole("link", { name: hintText, exact: false });
-        if (await loc.count() > 0) {
-          await loc.first().click({ timeout: 5_000 });
-          return true;
-        }
+        const loc = p.getByLabel(hint, { exact: false });
+        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
       } catch { /* fall through */ }
     }
 
@@ -509,40 +512,60 @@ export class HumanAgentRunner {
   }
 
   /**
-   * Fill fallback chain:
-   * 1. Exact selector
-   * 2. Placeholder parsed from selector string
-   * 3. First visible input/textarea on page
+   * Fill resolution chain (A11y-first):
+   * 1. @eN ref → getByRole("textbox" | "searchbox" | "combobox", {name})
+   * 2. getByLabel(name)
+   * 3. getByPlaceholder(name)
+   * 4. first visible input/textarea
    */
-  private async _robustFill(p: Page, selector: string, value: string): Promise<boolean> {
-    // 1. Exact selector
-    try {
-      const loc = p.locator(selector).first();
-      if (await loc.count() > 0) {
-        await loc.fill(value, { timeout: 6_000 });
-        return true;
-      }
-    } catch { /* fall through */ }
-
-    // 2. Placeholder parsed from selector
-    const placeholderMatch = selector.match(/\[placeholder="([^"]+)"\]/);
-    if (placeholderMatch) {
-      try {
-        const loc = p.getByPlaceholder(placeholderMatch[1]);
-        if (await loc.count() > 0) {
-          await loc.first().fill(value, { timeout: 6_000 });
-          return true;
+  private async _resolveAndFill(p: Page, target: string, value: string): Promise<boolean> {
+    // 1. Resolve @eN ref
+    if (target.startsWith("@e")) {
+      const ref = this.refMap.get(target);
+      if (ref) {
+        const fillRoles = ["textbox", "searchbox", "combobox", "spinbutton"] as const;
+        for (const role of fillRoles) {
+          if (ref.role !== role) continue;
+          try {
+            const loc = p.getByRole(role, { name: ref.name, exact: false });
+            if (await loc.count() > 0) {
+              await loc.first().fill(value, { timeout: 6_000 });
+              return true;
+            }
+          } catch { /* try next */ }
         }
+        // fallback: getByLabel with ref name
+        if (ref.name) {
+          try {
+            const loc = p.getByLabel(ref.name, { exact: false });
+            if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
+          } catch { /* fall through */ }
+        }
+      }
+    }
+
+    const hint = (this.refMap.get(target)?.name) ?? target;
+
+    // 2. getByLabel
+    if (hint && !hint.startsWith("@")) {
+      try {
+        const loc = p.getByLabel(hint, { exact: false });
+        if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
       } catch { /* fall through */ }
     }
 
-    // 3. First visible input or textarea
+    // 3. getByPlaceholder
+    if (hint && !hint.startsWith("@")) {
+      try {
+        const loc = p.getByPlaceholder(hint, { exact: false });
+        if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
+      } catch { /* fall through */ }
+    }
+
+    // 4. First visible input/textarea
     try {
-      const loc = p.locator("textarea:visible, input:visible").first();
-      if (await loc.count() > 0) {
-        await loc.fill(value, { timeout: 6_000 });
-        return true;
-      }
+      const loc = p.locator("textarea:visible, input:not([type=hidden]):not([type=submit]):visible").first();
+      if (await loc.count() > 0) { await loc.fill(value, { timeout: 6_000 }); return true; }
     } catch { /* fall through */ }
 
     return false;
