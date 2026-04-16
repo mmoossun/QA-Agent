@@ -12,7 +12,7 @@ import type { TestCase } from "@/lib/google-sheets";
 
 const RequestSchema = z.object({
   targetUrl: z.string().url(),
-  goal: z.string().min(1).max(1000),
+  goal: z.string().max(1000).optional().default(""),
   categories: z.array(z.string()).optional(),
   customPrompt: z.string().optional(),
   sheetRawTable: z.string().optional(),
@@ -77,9 +77,13 @@ Priorities:
 - Medium: important features, common paths
 - Low: edge cases, cosmetic issues`;
 
+    const goalLine = goal.trim()
+      ? `Testing goal: ${goal}`
+      : "Testing goal: Freely explore the web application and identify the most important scenarios to test across all key features.";
+
     const userPrompt = [
       `Target URL: ${targetUrl}`,
-      `Testing goal: ${goal}`,
+      goalLine,
       categoryLines ? `\nFocus areas:\n${categoryLines}` : "",
       sheetSection,
       customSection,

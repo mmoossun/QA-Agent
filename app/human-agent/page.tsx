@@ -289,6 +289,76 @@ export default function HumanAgentPage() {
     setRunning(false);
   };
 
+  // ── Run agent using generated test cases ─────────────────
+  const runFromCases = async () => {
+    const active = targets.filter(t => t.enabled && t.url.trim());
+    if (!active.length || testCases.length === 0 || running) return;
+
+    // Synthesize goal and inject test cases as structured context
+    const synthesizedGoal = goal.trim() || "다음 테스트 케이스들을 순서대로 실행하며 QA를 수행해주세요";
+    const casesList = testCases.slice(0, 20)
+      .map(tc => `[${tc.id}] ${tc.title}\n스텝: ${tc.steps}\n기대결과: ${tc.expectedResult}`)
+      .join("\n\n");
+    const synthesizedCustomPrompt = [
+      `실행할 테스트 케이스 목록 (${testCases.length}개):`,
+      casesList,
+      customPrompt.trim() ? `\n추가 지시사항: ${customPrompt.trim()}` : "",
+    ].filter(Boolean).join("\n");
+
+    setMode("run");
+    setRunning(true);
+    setExpandedStep(null);
+    const initial: TargetRun[] = active.map(t => ({ target: t, steps: [], result: null, status: "pending" }));
+    setRuns(initial);
+    setActiveTab(active[0].id);
+
+    for (let i = 0; i < active.length; i++) {
+      const target = active[i];
+      setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
+      try {
+        const res = await fetch("/api/human-agent/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targetUrl: target.url,
+            goal: synthesizedGoal,
+            loginEmail: target.loginEmail || undefined,
+            loginPassword: target.loginPassword || undefined,
+            maxSteps,
+            categories: Array.from(categories),
+            customPrompt: synthesizedCustomPrompt,
+            sheetRawTable: sheet?.rawTable || undefined,
+          }),
+        });
+        if (!res.body) throw new Error("No response body");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n"); buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.type === "step")
+                setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
+              else if (evt.type === "complete")
+                setRuns(p => p.map((r, idx) => idx === i ? { ...r, result: evt.result, status: evt.result.status } : r));
+              else if (evt.type === "error")
+                setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
+            } catch { /* ignore */ }
+          }
+        }
+      } catch (err) {
+        setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: String(err) } : r));
+      }
+    }
+    setRunning(false);
+  };
+
   const activeRun = runs.find(r => r.target.id === activeTab);
   const enabledCount = targets.filter(t => t.enabled && t.url.trim()).length;
   const busy = generating || running || exporting || importing;
@@ -314,11 +384,11 @@ export default function HumanAgentPage() {
 
       {/* Goal */}
       <div>
-        <label className="text-xs font-medium text-gray-600 block mb-1">테스트 목표</label>
+        <label className="text-xs font-medium text-gray-600 block mb-1">테스트 목표 <span className="text-gray-400 font-normal">(선택)</span></label>
         <textarea className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
           rows={3} value={goal} onChange={e => setGoal(e.target.value)}
-          placeholder="예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘" disabled={busy} />
-        <p className="text-xs text-gray-400 mt-0.5">자연어로 자유롭게 작성하세요</p>
+          placeholder="예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘&#10;&#10;비워두면 AI가 최적 시나리오를 자유롭게 판단합니다" disabled={busy} />
+        <p className="text-xs text-gray-400 mt-0.5">비워두면 AI가 사이트를 자유롭게 탐색하며 QA를 수행합니다</p>
       </div>
 
       {/* Sheet Upload */}
@@ -418,10 +488,16 @@ export default function HumanAgentPage() {
                     className="w-full accent-blue-500" disabled={busy} />
                   <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>30</span></div>
                 </div>
-                <button onClick={generate} disabled={busy || enabledCount === 0 || !goal.trim()}
+                <button onClick={generate} disabled={busy || enabledCount === 0}
                   className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
                   {generating ? "생성 중..." : "📋 테스트 케이스 생성"}
                 </button>
+                {testCases.length > 0 && (
+                  <button onClick={runFromCases} disabled={busy || enabledCount === 0}
+                    className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-600 hover:bg-emerald-700 text-white">
+                    {running ? "실행 중..." : `▶ 생성된 ${testCases.length}개 케이스로 직접 실행`}
+                  </button>
+                )}
                 {sheetId && testCases.length > 0 && (
                   <div className="space-y-1">
                     <button onClick={exportToSheets} disabled={busy}
@@ -455,7 +531,7 @@ export default function HumanAgentPage() {
                 {enabledCount > 1 && (
                   <p className="text-xs text-blue-600 text-center">{enabledCount}개 URL 순차 실행</p>
                 )}
-                <button onClick={startRun} disabled={busy || enabledCount === 0 || !goal.trim()}
+                <button onClick={startRun} disabled={busy || enabledCount === 0}
                   className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
                   {running ? "실행 중..." : "▶ 테스트 시작"}
                 </button>
@@ -484,7 +560,7 @@ export default function HumanAgentPage() {
           {running && (
             <span className="flex items-center gap-1.5 text-xs text-blue-600">
               <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-              Qwen3-VL 인식 → GPT-4o 판단 중...
+              GPT-4o 비전 인식 + 플래닝 중...
             </span>
           )}
           {mode === "generate" && testCases.length > 0 && (
@@ -560,7 +636,7 @@ export default function HumanAgentPage() {
                 <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
                   <div className="text-5xl">🤖</div>
                   <p className="text-sm">목표를 입력하고 테스트를 시작하세요</p>
-                  <p className="text-xs text-gray-300">Qwen3-VL + CDP A11y + GPT-4o + Validator</p>
+                  <p className="text-xs text-gray-300">GPT-4o 비전+플래닝 · CDP A11y · Playwright 실행 · 검증</p>
                 </div>
               )}
 
@@ -751,17 +827,17 @@ function StepCard({ step, expanded, onToggle }: { step: HumanStep; expanded: boo
       {expanded && (
         <div className="px-6 pb-4 space-y-3 bg-gray-50 border-t">
           <div className="pt-3 flex gap-2 flex-wrap">
-            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">👁 Qwen3-VL {(step.perceptionMs / 1000).toFixed(1)}s</span>
-            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">🧠 GPT-4o {(step.planningMs / 1000).toFixed(1)}s</span>
+            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">🧠 GPT-4o 비전+플래닝 {(step.planningMs / 1000).toFixed(1)}s</span>
+            <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">📸 캡처 {(step.perceptionMs / 1000).toFixed(1)}s</span>
           </div>
           {step.perception && (
             <div>
-              <p className="text-xs font-medium text-purple-600 mb-1">👁 Qwen3-VL 화면 인식</p>
-              <pre className="text-xs text-gray-600 bg-white rounded px-3 py-2 border whitespace-pre-wrap font-sans leading-relaxed max-h-40 overflow-y-auto">{step.perception}</pre>
+              <p className="text-xs font-medium text-blue-600 mb-1">🧠 GPT-4o 화면 인식</p>
+              <p className="text-xs text-gray-600 bg-white rounded px-3 py-2 border leading-relaxed">{step.perception}</p>
             </div>
           )}
           <div>
-            <p className="text-xs font-medium text-blue-600 mb-1">🧠 GPT-4o 판단</p>
+            <p className="text-xs font-medium text-gray-500 mb-1">판단 근거</p>
             <p className="text-xs text-gray-600 bg-white rounded px-3 py-2 border">{decision.observation}</p>
           </div>
           {(decision.target || decision.value) && (

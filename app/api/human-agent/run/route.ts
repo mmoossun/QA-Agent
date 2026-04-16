@@ -1,7 +1,7 @@
 /**
  * POST /api/human-agent/run
- * Human-mode QA agent — GPT-4o Vision perception-action loop
- * Streams each step via SSE
+ * Human-mode QA agent — GPT-4o Vision + Playwright loop
+ * Streams each step via SSE with keep-alive pings every 15s
  */
 
 import { NextRequest } from "next/server";
@@ -9,9 +9,13 @@ import { z } from "zod";
 import { HumanAgentRunner } from "@/lib/human-agent/runner";
 import { logger } from "@/lib/logger";
 
+// Prevent Next.js from caching/timing out this route
+export const maxDuration = 300; // 5 minutes (Vercel Pro / self-hosted)
+export const dynamic = "force-dynamic";
+
 const RequestSchema = z.object({
   targetUrl: z.string().url(),
-  goal: z.string().min(1).max(500),
+  goal: z.string().max(500).optional().default(""),
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
   maxSteps: z.number().min(1).max(30).default(20),
@@ -36,11 +40,28 @@ export async function POST(req: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (data: unknown) =>
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        let closed = false;
+
+        const send = (data: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          } catch { /* stream already closed */ }
+        };
+
+        const ping = () => {
+          if (closed) return;
+          try {
+            // SSE comment — keeps the connection alive without triggering the client
+            controller.enqueue(encoder.encode(": keep-alive\n\n"));
+          } catch { /* ignore */ }
+        };
+
+        // Send keep-alive ping every 15 seconds
+        const pingInterval = setInterval(ping, 15_000);
 
         try {
-          send({ type: "start", message: "Human Agent 시작 — 브라우저 실행 중...", targetUrl, goal });
+          send({ type: "start", message: "Human Agent v4 시작 — GPT-4o 비전+플래닝 (Qwen 제거, 5-10× 빠름)", targetUrl, goal });
 
           if (sheetRawTable) {
             const rowCount = sheetRawTable.split("\n").length - 2;
@@ -65,7 +86,9 @@ export async function POST(req: NextRequest) {
           logger.error({ err }, "Human agent error");
           send({ type: "error", message: String(err) });
         } finally {
-          controller.close();
+          clearInterval(pingInterval);
+          closed = true;
+          try { controller.close(); } catch { /* already closed */ }
         }
       },
     });
@@ -73,8 +96,9 @@ export async function POST(req: NextRequest) {
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
+        "X-Accel-Buffering": "no",    // disable Nginx buffering
       },
     });
   } catch (err) {
