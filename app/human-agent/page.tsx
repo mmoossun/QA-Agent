@@ -154,7 +154,7 @@ export default function HumanAgentPage() {
 
   // ── Generate test cases ───────────────────────────────────
   const generate = async () => {
-    if (!primaryUrl || !goal.trim() || generating) return;
+    if (!primaryUrl || generating) return;
     setGenerating(true);
     setGenError(null);
     setTestCases([]);
@@ -232,10 +232,70 @@ export default function HumanAgentPage() {
     a.download = `test-cases-${Date.now()}.csv`; a.click();
   };
 
+  // ── Save completed run to dashboard ──────────────────────
+  const saveToDashboard = async (target: TargetEntry, result: HumanAgentResult) => {
+    try {
+      const passCount = result.steps.filter(s => s.success).length;
+      const failCount = result.steps.filter(s => !s.success).length;
+      await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "human",
+          targetUrl: target.url,
+          scenarioCount: result.steps.length,
+          passCount,
+          failCount,
+          score: null,
+          passRate: result.steps.length > 0 ? (passCount / result.steps.length * 100) : 0,
+          duration: result.totalDurationMs,
+          status: result.status === "done" ? "completed" : "failed",
+          summary: result.summary,
+        }),
+      });
+    } catch { /* non-critical */ }
+  };
+
+  // ── SSE stream loop (shared) ──────────────────────────────
+  const streamRun = async (
+    i: number,
+    target: TargetEntry,
+    body: Record<string, unknown>,
+  ) => {
+    const res = await fetch("/api/human-agent/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.body) throw new Error("No response body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === "step")
+            setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
+          else if (evt.type === "complete") {
+            setRuns(p => p.map((r, idx) => idx === i ? { ...r, result: evt.result, status: evt.result.status } : r));
+            saveToDashboard(target, evt.result);
+          } else if (evt.type === "error")
+            setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
+        } catch { /* ignore */ }
+      }
+    }
+  };
+
   // ── Run agent ─────────────────────────────────────────────
   const startRun = async () => {
     const active = targets.filter(t => t.enabled && t.url.trim());
-    if (!active.length || !goal.trim() || running) return;
+    if (!active.length || running) return;
     setRunning(true);
     setExpandedStep(null);
     const initial: TargetRun[] = active.map(t => ({ target: t, steps: [], result: null, status: "pending" }));
@@ -246,42 +306,16 @@ export default function HumanAgentPage() {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
       try {
-        const res = await fetch("/api/human-agent/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            targetUrl: target.url,
-            goal: goal.trim(),
-            loginEmail: target.loginEmail || undefined,
-            loginPassword: target.loginPassword || undefined,
-            maxSteps,
-            categories: Array.from(categories),
-            customPrompt: customPrompt.trim() || undefined,
-            sheetRawTable: sheet?.rawTable || undefined,
-          }),
+        await streamRun(i, target, {
+          targetUrl: target.url,
+          goal: goal.trim(),
+          loginEmail: target.loginEmail || undefined,
+          loginPassword: target.loginPassword || undefined,
+          maxSteps,
+          categories: Array.from(categories),
+          customPrompt: customPrompt.trim() || undefined,
+          sheetRawTable: sheet?.rawTable || undefined,
         });
-        if (!res.body) throw new Error("No response body");
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n"); buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const evt = JSON.parse(line.slice(6));
-              if (evt.type === "step")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
-              else if (evt.type === "complete")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, result: evt.result, status: evt.result.status } : r));
-              else if (evt.type === "error")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
-            } catch { /* ignore */ }
-          }
-        }
       } catch (err) {
         setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: String(err) } : r));
       }
@@ -316,42 +350,16 @@ export default function HumanAgentPage() {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
       try {
-        const res = await fetch("/api/human-agent/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            targetUrl: target.url,
-            goal: synthesizedGoal,
-            loginEmail: target.loginEmail || undefined,
-            loginPassword: target.loginPassword || undefined,
-            maxSteps,
-            categories: Array.from(categories),
-            customPrompt: synthesizedCustomPrompt,
-            sheetRawTable: sheet?.rawTable || undefined,
-          }),
+        await streamRun(i, target, {
+          targetUrl: target.url,
+          goal: synthesizedGoal,
+          loginEmail: target.loginEmail || undefined,
+          loginPassword: target.loginPassword || undefined,
+          maxSteps,
+          categories: Array.from(categories),
+          customPrompt: synthesizedCustomPrompt,
+          sheetRawTable: sheet?.rawTable || undefined,
         });
-        if (!res.body) throw new Error("No response body");
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n"); buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const evt = JSON.parse(line.slice(6));
-              if (evt.type === "step")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
-              else if (evt.type === "complete")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, result: evt.result, status: evt.result.status } : r));
-              else if (evt.type === "error")
-                setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
-            } catch { /* ignore */ }
-          }
-        }
       } catch (err) {
         setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: String(err) } : r));
       }
@@ -523,10 +531,10 @@ export default function HumanAgentPage() {
                   <label className="text-xs font-medium text-gray-600 block mb-1">
                     최대 스텝 수: <span className="text-blue-600">{maxSteps}</span>
                   </label>
-                  <input type="range" min={5} max={30} step={5} value={maxSteps}
+                  <input type="range" min={5} max={100} step={5} value={maxSteps}
                     onChange={e => setMaxSteps(Number(e.target.value))}
                     className="w-full accent-blue-500" disabled={busy} />
-                  <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>30</span></div>
+                  <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>100</span></div>
                 </div>
                 {enabledCount > 1 && (
                   <p className="text-xs text-blue-600 text-center">{enabledCount}개 URL 순차 실행</p>
@@ -658,20 +666,11 @@ export default function HumanAgentPage() {
                 </div>
               )}
 
-              {activeRun?.result && (
-                <div className={`m-6 p-4 rounded-lg border text-sm ${
-                  activeRun.result.status === "done" ? "bg-green-50 border-green-200 text-green-800" :
-                  activeRun.result.status === "fail" ? "bg-red-50 border-red-200 text-red-800" :
-                  "bg-yellow-50 border-yellow-200 text-yellow-800"
-                }`}>
-                  <div className="font-semibold mb-1">
-                    {activeRun.result.status === "done" ? "✅ 완료" : activeRun.result.status === "fail" ? "❌ 버그 발견" : "⏱ 최대 스텝 도달"}
-                  </div>
-                  <p>{activeRun.result.summary}</p>
-                  <p className="text-xs mt-2 opacity-70">
-                    {activeRun.result.steps.length} 스텝 · {(activeRun.result.totalDurationMs / 1000).toFixed(1)}초
-                  </p>
-                </div>
+              {activeRun?.result && !running && (
+                <RunResultOverview
+                  run={activeRun}
+                  onRerun={() => { setRuns([]); startRun(); }}
+                />
               )}
 
               {activeRun?.status === "error" && (
@@ -797,6 +796,88 @@ function TargetCard({ target, onChange, onRemove, disabled }: {
             type="password" value={target.loginPassword} onChange={e => onChange("loginPassword", e.target.value)} placeholder="비밀번호 (선택)" disabled={disabled} />
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Run Result Overview ────────────────────────────────────────
+function RunResultOverview({ run, onRerun }: { run: TargetRun; onRerun: () => void }) {
+  const { result, steps, target } = run;
+  if (!result) return null;
+
+  const passCount = steps.filter(s => s.success).length;
+  const failCount = steps.filter(s => !s.success).length;
+  const passRate = steps.length > 0 ? (passCount / steps.length * 100) : 0;
+  const avgStepMs = result.totalDurationMs / Math.max(steps.length, 1);
+
+  const cfg = result.status === "done"
+    ? { emoji: "✅", label: "테스트 완료", bg: "bg-green-50", border: "border-green-200", text: "text-green-800", hdr: "bg-green-100" }
+    : result.status === "fail"
+    ? { emoji: "❌", label: "버그 발견", bg: "bg-red-50", border: "border-red-200", text: "text-red-800", hdr: "bg-red-100" }
+    : { emoji: "⏱", label: "최대 스텝 도달", bg: "bg-yellow-50", border: "border-yellow-200", text: "text-yellow-800", hdr: "bg-yellow-100" };
+
+  const failedSteps = steps.filter(s => !s.success);
+
+  return (
+    <div className={`m-6 rounded-xl border-2 ${cfg.border} ${cfg.bg} overflow-hidden`}>
+      {/* Header */}
+      <div className={`px-6 py-4 ${cfg.hdr} flex items-center justify-between`}>
+        <div className={`flex items-center gap-3 ${cfg.text}`}>
+          <span className="text-3xl">{cfg.emoji}</span>
+          <div>
+            <h3 className="font-bold text-base">{cfg.label}</h3>
+            <p className="text-xs opacity-70 mt-0.5">{target.label} · {target.url}</p>
+          </div>
+        </div>
+        <button onClick={onRerun}
+          className="px-4 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors shadow-sm">
+          🔄 다시 실행
+        </button>
+      </div>
+
+      {/* Metrics */}
+      <div className="px-6 py-4 grid grid-cols-4 gap-3">
+        {[
+          { label: "성공률", value: `${passRate.toFixed(0)}%`, sub: `${passCount}/${steps.length} 스텝` },
+          { label: "소요 시간", value: `${(result.totalDurationMs / 1000).toFixed(1)}s`, sub: "총 실행 시간" },
+          { label: "스텝당 평균", value: `${(avgStepMs / 1000).toFixed(1)}s`, sub: avgStepMs < 15000 ? "⚡ 빠름" : avgStepMs < 25000 ? "보통" : "느림" },
+          { label: "실패 스텝", value: String(failCount), sub: failCount === 0 ? "완벽한 실행" : "개선 필요" },
+        ].map(m => (
+          <div key={m.label} className="bg-white rounded-lg border border-gray-200 px-4 py-3">
+            <p className="text-xs text-gray-500 mb-1">{m.label}</p>
+            <p className="text-2xl font-bold text-gray-800">{m.value}</p>
+            <p className="text-xs text-gray-400 mt-0.5">{m.sub}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* AI Summary */}
+      <div className="px-6 pb-4">
+        <p className="text-xs font-semibold text-gray-500 mb-1">AI 요약</p>
+        <p className="text-sm text-gray-700 bg-white rounded-lg border border-gray-200 px-4 py-3 leading-relaxed">{result.summary}</p>
+      </div>
+
+      {/* Failed steps */}
+      {failedSteps.length > 0 && (
+        <div className="px-6 pb-5">
+          <p className="text-xs font-semibold text-red-500 mb-2">실패한 스텝 ({failedSteps.length}개)</p>
+          <div className="space-y-1.5">
+            {failedSteps.map(s => (
+              <div key={s.stepNumber} className="text-xs bg-white rounded-lg border border-red-100 px-3 py-2">
+                <span className="font-semibold text-red-600">Step {s.stepNumber}</span>
+                <span className="text-gray-500 ml-1">[{s.decision.action}]</span>
+                <span className="text-gray-700 ml-1">{s.decision.description}</span>
+                {s.error && <div className="text-red-500 mt-0.5 truncate">⚠ {s.error}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Dashboard save note */}
+      <div className="px-6 pb-4">
+        <p className="text-xs text-gray-400">✓ 결과가 대시보드에 자동 저장되었습니다</p>
+      </div>
     </div>
   );
 }

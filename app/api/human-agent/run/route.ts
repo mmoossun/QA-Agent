@@ -18,7 +18,7 @@ const RequestSchema = z.object({
   goal: z.string().max(500).optional().default(""),
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
-  maxSteps: z.number().min(1).max(30).default(20),
+  maxSteps: z.number().min(1).max(100).default(20),
   categories: z.array(z.string()).optional(),
   customPrompt: z.string().optional(),
   sheetRawTable: z.string().optional(),

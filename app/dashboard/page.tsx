@@ -18,6 +18,7 @@ interface RunRecord {
 }
 
 function modeLabel(mode: string) {
+  if (mode === "human") return { text: "Human Agent", cls: "bg-emerald-100 text-emerald-700" };
   if (mode === "agent") return { text: "Auto Agent", cls: "bg-purple-100 text-purple-700" };
   if (mode === "quick") return { text: "Quick Run", cls: "bg-blue-100 text-blue-700" };
   return { text: "Chat QA", cls: "bg-green-100 text-green-700" };

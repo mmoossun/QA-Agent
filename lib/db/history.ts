@@ -12,7 +12,7 @@ const MAX_RUNS = 200;
 
 export interface RunRecord {
   id: string;
-  mode: "chat" | "quick" | "agent";
+  mode: "chat" | "quick" | "agent" | "human";
   targetUrl: string;
   scenarioCount: number;
   passCount: number;
