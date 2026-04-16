@@ -1,9 +1,10 @@
 /**
  * Human-mode Agent Runner — Hybrid Vision Architecture
  *
- * Step 1 — Perception  : Qwen3-VL  → screenshot → structured UI description (Korean OCR)
- * Step 2 — Planning    : GPT-4o    → description + goal + history → next action JSON
- * Step 3 — Execution   : Playwright → run action on real browser
+ * Step 1a — Perception  : Qwen3-VL  → screenshot → screen state / layout / errors (Korean OCR)
+ * Step 1b — DOM Extract : Playwright → real interactive elements with guaranteed selectors
+ * Step 2  — Planning    : GPT-4o    → Vision context + DOM elements + history → next action JSON
+ * Step 3  — Execution   : Playwright → multi-strategy fallback click/fill
  */
 
 import { chromium, type Browser, type Page } from "playwright";
@@ -33,8 +34,8 @@ export interface ActionDecision {
 
 export interface HumanStep {
   stepNumber: number;
-  perception: string;   // Qwen3-VL output
-  decision: ActionDecision;  // GPT-4o output
+  perception: string;
+  decision: ActionDecision;
   screenshotPath: string;
   success: boolean;
   error?: string;
@@ -65,30 +66,47 @@ export interface HumanAgentConfig {
   onStep?: (step: HumanStep) => void;
 }
 
+interface DOMElement {
+  type: string;
+  label: string;
+  selector: string;
+  currentValue?: string;
+}
+
 // ─── GPT-4o Planning System Prompt ───────────────────────────
 const PLANNING_SYSTEM = `You are an expert QA tester operating a web browser.
-You receive a structured description of the current screen (from a vision model) and must decide the SINGLE NEXT action.
 
-Respond with ONLY a raw JSON object (no markdown, no extra text):
+Each step you receive two inputs:
+  1. REAL_DOM_ELEMENTS — interactive elements queried directly from the live DOM.
+     These selectors are GUARANTEED to exist right now. Always use these for click/fill targets.
+  2. SCREEN_DESCRIPTION — visual analysis from Qwen3-VL (Korean OCR).
+     Use this to understand page state, errors, messages, and overall flow.
+     NEVER use selectors from SCREEN_DESCRIPTION — they may be inaccurate.
+
+Decision rules:
+- Use selectors from REAL_DOM_ELEMENTS only.
+- If the element you need is not listed, use scroll/wait and it will appear next step.
+- If goal is achieved and verified, use done.
+- If a clear bug or blocker exists, use fail.
+
+Respond with ONLY a raw JSON object (no markdown, no code fences):
 {
   "action": "click" | "fill" | "navigate" | "wait" | "scroll" | "press" | "done" | "fail",
-  "target": "CSS selector from the screen description",
-  "value": "text to type / URL / key / scroll pixels",
-  "description": "what you are doing and why — think out loud",
+  "target": "selector from REAL_DOM_ELEMENTS",
+  "value": "text to type / URL / key name / scroll pixels",
+  "description": "what you are doing and why",
   "observation": "brief summary of current screen state"
 }
 
 Action guide:
-- click: use the exact selector from INTERACTIVE_ELEMENTS in the description
-- fill: target = input selector, value = text to enter
-- navigate: value = full URL
-- wait: value = ms e.g. "2000"
-- scroll: value = pixels e.g. "500"
-- press: value = Enter | Tab | Escape
-- done: goal fully verified — describe what you confirmed works
-- fail: bug found or goal is impossible — describe the issue
-
-Use selectors EXACTLY as listed in INTERACTIVE_ELEMENTS. Return raw JSON only.`;
+- click    : target = selector from REAL_DOM_ELEMENTS
+- fill     : target = input selector from REAL_DOM_ELEMENTS, value = text to enter
+- navigate : value = full URL
+- wait     : value = milliseconds e.g. "2000"
+- scroll   : value = pixels to scroll down e.g. "500"
+- press    : value = Enter | Tab | Escape
+- done     : goal fully verified
+- fail     : bug found or goal is impossible`;
 
 // ─── Runner ────────────────────────────────────────────────────
 export class HumanAgentRunner {
@@ -131,19 +149,22 @@ export class HumanAgentRunner {
       for (let step = 1; step <= maxSteps; step++) {
         const stepStart = Date.now();
 
-        // ── Step 1: Qwen3-VL Perception ───────────────────────
+        // ── Step 1: Screenshot + Perception + DOM (parallel) ──
         const { base64, publicPath } = await this._screenshot(`step${step}`);
         const percStart = Date.now();
-        const perception = await perceiveScreen(base64, this.page.url());
+        const [perception, domElements] = await Promise.all([
+          perceiveScreen(base64, this.page.url()),
+          this._extractDOMElements(),
+        ]);
         const perceptionMs = Date.now() - percStart;
 
         // ── Step 2: GPT-4o Planning ────────────────────────────
         const planStart = Date.now();
-        const decision = await this._plan(perception, step, maxSteps);
+        const decision = await this._plan(perception, domElements, step, maxSteps);
         const planningMs = Date.now() - planStart;
 
         // ── Step 3: Playwright Execution ───────────────────────
-        const { success, error } = await this._execute(decision);
+        const { success, error } = await this._execute(decision, domElements);
 
         const humanStep: HumanStep = {
           stepNumber: step,
@@ -188,6 +209,92 @@ export class HumanAgentRunner {
     }
   }
 
+  // ── Extract real interactive elements from the live DOM ──────
+  private async _extractDOMElements(): Promise<DOMElement[]> {
+    try {
+      return await this.page!.evaluate((): DOMElement[] => {
+        const results: DOMElement[] = [];
+        const seen = new Set<string>();
+
+        function bestSelector(el: Element): string {
+          if (el.id) return `#${CSS.escape(el.id)}`;
+          const tag = el.tagName.toLowerCase();
+          const ariaLabel = el.getAttribute("aria-label");
+          if (ariaLabel) return `[aria-label="${ariaLabel}"]`;
+          const placeholder = el.getAttribute("placeholder");
+          if (placeholder) return `${tag}[placeholder="${placeholder}"]`;
+          const name = el.getAttribute("name");
+          if (name) return `${tag}[name="${name}"]`;
+          const type = (el as HTMLInputElement).type;
+          if (type && type !== "text") return `${tag}[type="${type}"]`;
+          // nth-of-type as last resort
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            const idx = siblings.indexOf(el as HTMLElement);
+            if (idx >= 0) return `${tag}:nth-of-type(${idx + 1})`;
+          }
+          return tag;
+        }
+
+        function getLabel(el: Element): string {
+          return (
+            el.getAttribute("aria-label") ||
+            el.getAttribute("placeholder") ||
+            el.getAttribute("title") ||
+            el.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) ||
+            el.getAttribute("name") ||
+            ""
+          );
+        }
+
+        function push(type: string, el: Element, extra?: { currentValue?: string }) {
+          const label = getLabel(el);
+          const selector = bestSelector(el);
+          if (seen.has(selector)) return;
+          seen.add(selector);
+          results.push({ type, label, selector, ...extra });
+        }
+
+        // Buttons (skip disabled)
+        document.querySelectorAll(
+          'button:not([disabled]), [role="button"]:not([disabled]), input[type="submit"], input[type="button"]'
+        ).forEach(el => push("button", el));
+
+        // Inputs & textareas (skip hidden/disabled)
+        document.querySelectorAll(
+          'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([disabled]), textarea:not([disabled])'
+        ).forEach(el => {
+          const inp = el as HTMLInputElement;
+          push(`input[${inp.type || "text"}]`, el, { currentValue: inp.value || undefined });
+        });
+
+        // Selects
+        document.querySelectorAll("select:not([disabled])").forEach(el => push("select", el));
+
+        // Links (cap at 40, skip blank/hash hrefs)
+        let linkCount = 0;
+        document.querySelectorAll("a[href]").forEach(el => {
+          if (linkCount >= 40) return;
+          const href = el.getAttribute("href") ?? "";
+          if (!href || href === "#") return;
+          const label = getLabel(el);
+          if (!label) return;
+          const selector = el.id ? `#${CSS.escape(el.id)}` : `a[href="${href}"]`;
+          if (seen.has(selector)) return;
+          seen.add(selector);
+          results.push({ type: "link", label, selector });
+          linkCount++;
+        });
+
+        return results;
+      });
+    } catch (e) {
+      logger.warn({ e }, "DOM extraction failed");
+      return [];
+    }
+  }
+
   private async _tryLogin(): Promise<void> {
     const { loginEmail, loginPassword } = this.config;
     if (!loginEmail || !loginPassword || !this.page) return;
@@ -216,7 +323,12 @@ export class HumanAgentRunner {
     return { base64: buffer.toString("base64"), publicPath: `/api/screenshots/${filename}` };
   }
 
-  private async _plan(perception: string, stepNum: number, maxSteps: number): Promise<ActionDecision> {
+  private async _plan(
+    perception: string,
+    domElements: DOMElement[],
+    stepNum: number,
+    maxSteps: number
+  ): Promise<ActionDecision> {
     const historyText = this.actionHistory.length
       ? `\nPrevious steps:\n${this.actionHistory.slice(-6).join("\n")}`
       : "";
@@ -226,15 +338,35 @@ export class HumanAgentRunner {
       : "";
 
     const sheetText = this.config.sheetRawTable
-      ? `\n\n--- TEST SHEET (interpret freely) ---\n${this.config.sheetRawTable}`
+      ? `\n\n--- TEST SHEET ---\n${this.config.sheetRawTable}`
       : "";
 
     const customText = this.config.customPrompt
       ? `\n\nAdditional instructions: ${this.config.customPrompt}`
       : "";
 
-    const userMessage =
-      `Goal: "${this.config.goal}"${categoryText}\nCurrent URL: ${this.page?.url()}\nStep: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}\n\n--- SCREEN DESCRIPTION (from Qwen3-VL) ---\n${perception}\n\nDecide the next action.`;
+    const domText = domElements.length
+      ? domElements
+          .map(e =>
+            `- [${e.type}] "${e.label}" → ${e.selector}` +
+            (e.currentValue ? ` (current: "${e.currentValue}")` : "")
+          )
+          .join("\n")
+      : "(no interactive elements found — consider scroll or wait)";
+
+    const userMessage = [
+      `Goal: "${this.config.goal}"${categoryText}`,
+      `Current URL: ${this.page?.url()}`,
+      `Step: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}`,
+      "",
+      "--- REAL_DOM_ELEMENTS (guaranteed selectors — use ONLY these for target) ---",
+      domText,
+      "",
+      "--- SCREEN_DESCRIPTION from Qwen3-VL (visual context, Korean OCR — DO NOT use its selectors) ---",
+      perception,
+      "",
+      "Decide the next action.",
+    ].join("\n");
 
     try {
       const response = await openAIClient().chat.completions.create({
@@ -252,7 +384,10 @@ export class HumanAgentRunner {
     }
   }
 
-  private async _execute(d: ActionDecision): Promise<{ success: boolean; error?: string }> {
+  private async _execute(
+    d: ActionDecision,
+    domElements: DOMElement[]
+  ): Promise<{ success: boolean; error?: string }> {
     const p = this.page!;
     try {
       switch (d.action) {
@@ -262,23 +397,17 @@ export class HumanAgentRunner {
           break;
 
         case "click": {
-          const sel = d.target ?? "";
-          let clicked = false;
-          if (sel) {
-            try { await p.locator(sel).first().click({ timeout: 6_000 }); clicked = true; }
-            catch {
-              const byText = p.getByText(sel, { exact: false });
-              if (await byText.count() > 0) { await byText.first().click({ timeout: 6_000 }); clicked = true; }
-            }
-          }
-          if (!clicked) throw new Error(`클릭 대상 없음: ${sel}`);
-          await p.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
+          const clicked = await this._robustClick(p, d.target ?? "", d.value ?? d.description, domElements);
+          if (!clicked) throw new Error(`클릭 대상 없음: ${d.target}`);
+          await p.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => {});
           break;
         }
 
-        case "fill":
-          await p.locator(d.target ?? "input").first().fill(d.value ?? "", { timeout: 8_000 });
+        case "fill": {
+          const filled = await this._robustFill(p, d.target ?? "input", d.value ?? "");
+          if (!filled) throw new Error(`입력 대상 없음: ${d.target}`);
           break;
+        }
 
         case "wait":
           await p.waitForTimeout(Number(d.value ?? 1000));
@@ -302,5 +431,120 @@ export class HumanAgentRunner {
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  /**
+   * Click fallback chain:
+   * 1. Exact DOM selector (from REAL_DOM_ELEMENTS)
+   * 2. aria-label parsed from selector string
+   * 3. getByRole("button") with hint text
+   * 4. getByText with hint text
+   * 5. getByRole("link") with hint text
+   */
+  private async _robustClick(
+    p: Page,
+    selector: string,
+    hint: string,
+    _domElements: DOMElement[]
+  ): Promise<boolean> {
+    // 1. Exact selector
+    if (selector) {
+      try {
+        const loc = p.locator(selector).first();
+        if (await loc.count() > 0) {
+          await loc.click({ timeout: 5_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    // 2. aria-label parsed from selector
+    const ariaMatch = selector.match(/\[aria-label="([^"]+)"\]/);
+    if (ariaMatch) {
+      try {
+        const loc = p.getByLabel(ariaMatch[1]);
+        if (await loc.count() > 0) {
+          await loc.first().click({ timeout: 5_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    const hintText = hint || selector;
+
+    // 3. getByRole button
+    if (hintText) {
+      try {
+        const loc = p.getByRole("button", { name: hintText, exact: false });
+        if (await loc.count() > 0) {
+          await loc.first().click({ timeout: 5_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    // 4. getByText
+    if (hintText) {
+      try {
+        const loc = p.getByText(hintText, { exact: false });
+        if (await loc.count() > 0) {
+          await loc.first().click({ timeout: 5_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    // 5. getByRole link
+    if (hintText) {
+      try {
+        const loc = p.getByRole("link", { name: hintText, exact: false });
+        if (await loc.count() > 0) {
+          await loc.first().click({ timeout: 5_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    return false;
+  }
+
+  /**
+   * Fill fallback chain:
+   * 1. Exact selector
+   * 2. Placeholder parsed from selector string
+   * 3. First visible input/textarea on page
+   */
+  private async _robustFill(p: Page, selector: string, value: string): Promise<boolean> {
+    // 1. Exact selector
+    try {
+      const loc = p.locator(selector).first();
+      if (await loc.count() > 0) {
+        await loc.fill(value, { timeout: 6_000 });
+        return true;
+      }
+    } catch { /* fall through */ }
+
+    // 2. Placeholder parsed from selector
+    const placeholderMatch = selector.match(/\[placeholder="([^"]+)"\]/);
+    if (placeholderMatch) {
+      try {
+        const loc = p.getByPlaceholder(placeholderMatch[1]);
+        if (await loc.count() > 0) {
+          await loc.first().fill(value, { timeout: 6_000 });
+          return true;
+        }
+      } catch { /* fall through */ }
+    }
+
+    // 3. First visible input or textarea
+    try {
+      const loc = p.locator("textarea:visible, input:visible").first();
+      if (await loc.count() > 0) {
+        await loc.fill(value, { timeout: 6_000 });
+        return true;
+      }
+    } catch { /* fall through */ }
+
+    return false;
   }
 }
