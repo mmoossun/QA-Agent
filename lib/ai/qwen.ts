@@ -1,25 +1,25 @@
 /**
- * Qwen3-VL Vision — OCR + UI perception via DashScope API (OpenAI-compatible)
+ * Qwen3-VL Vision — via OpenRouter API (OpenAI-compatible)
  * Role: screenshot → structured UI description (Korean-optimized)
  */
 
 import OpenAI from "openai";
-import * as path from "path";
-import * as dotenv from "dotenv";
 
-dotenv.config({ path: path.resolve(process.cwd(), ".env") });
-
-export const QWEN_MODEL = "qwen-vl-max-latest"; // Qwen3-VL (latest alias)
+export const QWEN_MODEL = "qwen/qwen3-vl-235b-a22b-instruct";
 
 let _client: OpenAI | null = null;
 
 function getClient(): OpenAI {
   if (!_client) {
-    const apiKey = process.env.DASHSCOPE_API_KEY;
-    if (!apiKey) throw new Error("DASHSCOPE_API_KEY is not set.");
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set.");
     _client = new OpenAI({
       apiKey,
-      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: {
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+        "X-Title": "QA Agent",
+      },
     });
   }
   return _client;
@@ -55,27 +55,28 @@ export async function perceiveScreen(
 ): Promise<string> {
   const start = Date.now();
 
-  const userContent: OpenAI.Chat.ChatCompletionContentPart[] = [
-    {
-      type: "text",
-      text: `Analyze this screenshot${currentUrl ? ` (URL: ${currentUrl})` : ""}. Describe all UI elements precisely.`,
-    },
-    {
-      type: "image_url",
-      image_url: { url: `data:image/png;base64,${imageBase64}` },
-    },
-  ];
-
   const response = await getClient().chat.completions.create({
     model: QWEN_MODEL,
     max_tokens: 1024,
     messages: [
       { role: "system", content: PERCEPTION_SYSTEM },
-      { role: "user", content: userContent },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `Analyze this screenshot${currentUrl ? ` (URL: ${currentUrl})` : ""}. Describe all UI elements precisely.`,
+          },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${imageBase64}` },
+          },
+        ],
+      },
     ],
   });
 
   const text = response.choices[0]?.message?.content ?? "";
-  console.log(`[Qwen3-VL] ${Date.now() - start}ms | perception done`);
+  console.log(`[Qwen3-VL via OpenRouter] ${Date.now() - start}ms | perception done`);
   return text;
 }
