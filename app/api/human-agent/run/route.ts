@@ -15,6 +15,9 @@ const RequestSchema = z.object({
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
   maxSteps: z.number().min(1).max(30).default(20),
+  categories: z.array(z.string()).optional(),
+  customPrompt: z.string().optional(),
+  sheetRawTable: z.string().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -28,7 +31,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { targetUrl, goal, loginEmail, loginPassword, maxSteps } = parsed.data;
+    const { targetUrl, goal, loginEmail, loginPassword, maxSteps, categories, customPrompt, sheetRawTable } = parsed.data;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -39,12 +42,20 @@ export async function POST(req: NextRequest) {
         try {
           send({ type: "start", message: "Human Agent 시작 — 브라우저 실행 중...", targetUrl, goal });
 
+          if (sheetRawTable) {
+            const rowCount = sheetRawTable.split("\n").length - 2;
+            send({ type: "info", message: `📄 시트 ${rowCount}행 로드됨 → AI가 자유 해석 후 테스트에 반영` });
+          }
+
           const runner = new HumanAgentRunner({
             targetUrl,
             goal,
             loginEmail,
             loginPassword,
             maxSteps,
+            categories,
+            customPrompt,
+            sheetRawTable,
             onStep: (step) => send({ type: "step", step }),
           });
 

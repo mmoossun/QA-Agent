@@ -59,6 +59,9 @@ export interface HumanAgentConfig {
   loginEmail?: string;
   loginPassword?: string;
   maxSteps?: number;
+  categories?: string[];
+  customPrompt?: string;
+  sheetRawTable?: string;
   onStep?: (step: HumanStep) => void;
 }
 
@@ -218,8 +221,20 @@ export class HumanAgentRunner {
       ? `\nPrevious steps:\n${this.actionHistory.slice(-6).join("\n")}`
       : "";
 
+    const categoryText = this.config.categories?.length
+      ? `\nFocus areas: ${this.config.categories.join(", ")}`
+      : "";
+
+    const sheetText = this.config.sheetRawTable
+      ? `\n\n--- TEST SHEET (interpret freely) ---\n${this.config.sheetRawTable}`
+      : "";
+
+    const customText = this.config.customPrompt
+      ? `\n\nAdditional instructions: ${this.config.customPrompt}`
+      : "";
+
     const userMessage =
-      `Goal: "${this.config.goal}"\nCurrent URL: ${this.page?.url()}\nStep: ${stepNum}/${maxSteps}${historyText}\n\n--- SCREEN DESCRIPTION (from Qwen3-VL) ---\n${perception}\n\nDecide the next action.`;
+      `Goal: "${this.config.goal}"${categoryText}\nCurrent URL: ${this.page?.url()}\nStep: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}\n\n--- SCREEN DESCRIPTION (from Qwen3-VL) ---\n${perception}\n\nDecide the next action.`;
 
     try {
       const response = await openAIClient().chat.completions.create({
