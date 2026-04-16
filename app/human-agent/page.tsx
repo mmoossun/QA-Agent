@@ -186,7 +186,7 @@ export default function HumanAgentPage() {
             {running && (
               <span className="flex items-center gap-1.5 text-xs text-blue-600">
                 <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-                GPT-4o Vision이 화면을 보고 판단 중...
+                Qwen3-VL 인식 → GPT-4o 판단 중...
               </span>
             )}
             {result && (
@@ -301,18 +301,36 @@ function StepCard({ step, expanded, onToggle }: {
         </div>
       </button>
 
-      {/* Expanded: observation + screenshot */}
+      {/* Expanded: perception + planning + screenshot */}
       {expanded && (
         <div className="px-6 pb-4 space-y-3 bg-gray-50 border-t">
-          {/* Observation */}
-          <div className="pt-3">
-            <p className="text-xs font-medium text-gray-500 mb-1">👁 AI 관찰</p>
+          {/* Timing badges */}
+          <div className="pt-3 flex gap-2">
+            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
+              👁 Qwen3-VL {(step.perceptionMs / 1000).toFixed(1)}s
+            </span>
+            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+              🧠 GPT-4o {(step.planningMs / 1000).toFixed(1)}s
+            </span>
+          </div>
+
+          {/* Qwen3-VL perception */}
+          {step.perception && (
+            <div>
+              <p className="text-xs font-medium text-purple-600 mb-1">👁 Qwen3-VL 화면 인식</p>
+              <pre className="text-xs text-gray-600 bg-white rounded px-3 py-2 border whitespace-pre-wrap font-sans leading-relaxed max-h-40 overflow-y-auto">{step.perception}</pre>
+            </div>
+          )}
+
+          {/* GPT-4o decision */}
+          <div>
+            <p className="text-xs font-medium text-blue-600 mb-1">🧠 GPT-4o 판단</p>
             <p className="text-xs text-gray-600 bg-white rounded px-3 py-2 border">{decision.observation}</p>
           </div>
 
           {/* Target/Value */}
           {(decision.target || decision.value) && (
-            <div className="flex gap-4 text-xs">
+            <div className="flex gap-4 text-xs flex-wrap">
               {decision.target && (
                 <div>
                   <span className="text-gray-400">target: </span>

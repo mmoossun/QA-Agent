@@ -1,14 +1,17 @@
 /**
- * Human-mode Agent Runner
- * Perception → Action loop using GPT-4o Vision
- * Acts like a real human QA tester: sees screenshot → decides action → executes
+ * Human-mode Agent Runner — Hybrid Vision Architecture
+ *
+ * Step 1 — Perception  : Qwen3-VL  → screenshot → structured UI description (Korean OCR)
+ * Step 2 — Planning    : GPT-4o    → description + goal + history → next action JSON
+ * Step 3 — Execution   : Playwright → run action on real browser
  */
 
 import { chromium, type Browser, type Page } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import { v4 as uuidv4 } from "uuid";
-import { chatWithVision } from "@/lib/ai/openai";
+import { perceiveScreen } from "@/lib/ai/qwen";
+import { openAIClient } from "@/lib/ai/openai";
 import { extractJSON } from "@/lib/ai/claude";
 import { logger } from "@/lib/logger";
 
@@ -30,11 +33,14 @@ export interface ActionDecision {
 
 export interface HumanStep {
   stepNumber: number;
-  decision: ActionDecision;
+  perception: string;   // Qwen3-VL output
+  decision: ActionDecision;  // GPT-4o output
   screenshotPath: string;
   success: boolean;
   error?: string;
   durationMs: number;
+  perceptionMs: number;
+  planningMs: number;
 }
 
 export interface HumanAgentResult {
@@ -56,36 +62,30 @@ export interface HumanAgentConfig {
   onStep?: (step: HumanStep) => void;
 }
 
-// ─── System Prompt ─────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are an expert human QA tester operating a real web browser.
-You receive a screenshot of the current browser state and decide the SINGLE NEXT action.
+// ─── GPT-4o Planning System Prompt ───────────────────────────
+const PLANNING_SYSTEM = `You are an expert QA tester operating a web browser.
+You receive a structured description of the current screen (from a vision model) and must decide the SINGLE NEXT action.
 
-Behave like a real human tester:
-- Read the screenshot carefully — identify buttons, inputs, text, errors
-- Interact naturally: open menus, type messages, click buttons
-- Verify results after each action
-- If something is broken, describe it clearly
-
-Respond with ONLY a raw JSON object (no markdown, no code blocks):
+Respond with ONLY a raw JSON object (no markdown, no extra text):
 {
   "action": "click" | "fill" | "navigate" | "wait" | "scroll" | "press" | "done" | "fail",
-  "target": "CSS selector (prefer: button, a, input[type=X], [placeholder=X], .classname)",
+  "target": "CSS selector from the screen description",
   "value": "text to type / URL / key / scroll pixels",
   "description": "what you are doing and why — think out loud",
-  "observation": "what you see on screen right now — be specific"
+  "observation": "brief summary of current screen state"
 }
 
-Rules:
-- click: target = CSS selector or visible button text
-- fill: target = input CSS selector, value = text to enter
+Action guide:
+- click: use the exact selector from INTERACTIVE_ELEMENTS in the description
+- fill: target = input selector, value = text to enter
 - navigate: value = full URL
-- wait: value = ms as string e.g. "2000"
-- scroll: value = pixels as string e.g. "500"
-- press: value = Enter | Tab | Escape | Space
-- done: goal fully completed — describe what you verified
-- fail: bug found or goal impossible — describe the problem
+- wait: value = ms e.g. "2000"
+- scroll: value = pixels e.g. "500"
+- press: value = Enter | Tab | Escape
+- done: goal fully verified — describe what you confirmed works
+- fail: bug found or goal is impossible — describe the issue
 
-Always return raw JSON only. No extra text.`;
+Use selectors EXACTLY as listed in INTERACTIVE_ELEMENTS. Return raw JSON only.`;
 
 // ─── Runner ────────────────────────────────────────────────────
 export class HumanAgentRunner {
@@ -105,8 +105,13 @@ export class HumanAgentRunner {
     const maxSteps = this.config.maxSteps ?? 20;
     const startTime = Date.now();
 
-    const ctx = await chromium.launch({ headless: true })
-      .then((b) => { this.browser = b; return b.newContext({ viewport: { width: 1440, height: 900 }, locale: "ko-KR", timezoneId: "Asia/Seoul" }); });
+    const browser = await chromium.launch({ headless: true });
+    this.browser = browser;
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      locale: "ko-KR",
+      timezoneId: "Asia/Seoul",
+    });
     this.page = await ctx.newPage();
 
     try {
@@ -123,17 +128,30 @@ export class HumanAgentRunner {
       for (let step = 1; step <= maxSteps; step++) {
         const stepStart = Date.now();
 
+        // ── Step 1: Qwen3-VL Perception ───────────────────────
         const { base64, publicPath } = await this._screenshot(`step${step}`);
-        const decision = await this._decideAction(base64, step);
-        const { success, error } = await this._executeAction(decision);
+        const percStart = Date.now();
+        const perception = await perceiveScreen(base64, this.page.url());
+        const perceptionMs = Date.now() - percStart;
+
+        // ── Step 2: GPT-4o Planning ────────────────────────────
+        const planStart = Date.now();
+        const decision = await this._plan(perception, step, maxSteps);
+        const planningMs = Date.now() - planStart;
+
+        // ── Step 3: Playwright Execution ───────────────────────
+        const { success, error } = await this._execute(decision);
 
         const humanStep: HumanStep = {
           stepNumber: step,
+          perception,
           decision,
           screenshotPath: publicPath,
           success,
           error,
           durationMs: Date.now() - stepStart,
+          perceptionMs,
+          planningMs,
         };
 
         this.steps.push(humanStep);
@@ -146,7 +164,7 @@ export class HumanAgentRunner {
         if (decision.action === "done") { status = "done"; summary = decision.description; break; }
         if (decision.action === "fail") { status = "fail"; summary = decision.description; break; }
 
-        await this.page.waitForTimeout(600);
+        await this.page.waitForTimeout(700);
       }
 
       if (status === "max_steps") {
@@ -182,7 +200,7 @@ export class HumanAgentRunner {
         await this.page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
         await this.page.waitForTimeout(2000);
       }
-    } catch (e) { logger.warn({ e }, "Human agent login failed"); }
+    } catch (e) { logger.warn({ e }, "Login failed"); }
   }
 
   private async _screenshot(name: string): Promise<{ base64: string; publicPath: string }> {
@@ -195,23 +213,31 @@ export class HumanAgentRunner {
     return { base64: buffer.toString("base64"), publicPath: `/api/screenshots/${filename}` };
   }
 
-  private async _decideAction(screenshotBase64: string, stepNum: number): Promise<ActionDecision> {
+  private async _plan(perception: string, stepNum: number, maxSteps: number): Promise<ActionDecision> {
     const historyText = this.actionHistory.length
-      ? `\nPrevious steps:\n${this.actionHistory.slice(-8).join("\n")}`
+      ? `\nPrevious steps:\n${this.actionHistory.slice(-6).join("\n")}`
       : "";
 
     const userMessage =
-      `Goal: "${this.config.goal}"\nCurrent URL: ${this.page?.url()}\nStep: ${stepNum}/${this.config.maxSteps ?? 20}${historyText}\n\nWhat is your next action?`;
+      `Goal: "${this.config.goal}"\nCurrent URL: ${this.page?.url()}\nStep: ${stepNum}/${maxSteps}${historyText}\n\n--- SCREEN DESCRIPTION (from Qwen3-VL) ---\n${perception}\n\nDecide the next action.`;
 
     try {
-      const raw = await chatWithVision(SYSTEM_PROMPT, [{ role: "user", content: userMessage }], screenshotBase64, { maxTokens: 512 });
+      const response = await openAIClient().chat.completions.create({
+        model: "gpt-4o",
+        max_tokens: 512,
+        messages: [
+          { role: "system", content: PLANNING_SYSTEM },
+          { role: "user", content: userMessage },
+        ],
+      });
+      const raw = response.choices[0]?.message?.content ?? "";
       return extractJSON<ActionDecision>(raw);
     } catch {
-      return { action: "wait", value: "1500", description: "응답 파싱 실패 — 잠시 대기", observation: "파싱 오류" };
+      return { action: "wait", value: "1500", description: "플래닝 실패 — 대기", observation: "오류" };
     }
   }
 
-  private async _executeAction(d: ActionDecision): Promise<{ success: boolean; error?: string }> {
+  private async _execute(d: ActionDecision): Promise<{ success: boolean; error?: string }> {
     const p = this.page!;
     try {
       switch (d.action) {
@@ -224,16 +250,13 @@ export class HumanAgentRunner {
           const sel = d.target ?? "";
           let clicked = false;
           if (sel) {
-            try {
-              await p.locator(sel).first().click({ timeout: 6_000 });
-              clicked = true;
-            } catch {
-              // fallback: text-based click
+            try { await p.locator(sel).first().click({ timeout: 6_000 }); clicked = true; }
+            catch {
               const byText = p.getByText(sel, { exact: false });
               if (await byText.count() > 0) { await byText.first().click({ timeout: 6_000 }); clicked = true; }
             }
           }
-          if (!clicked) throw new Error(`클릭 대상을 찾을 수 없음: ${sel}`);
+          if (!clicked) throw new Error(`클릭 대상 없음: ${sel}`);
           await p.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
           break;
         }
