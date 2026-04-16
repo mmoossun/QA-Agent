@@ -1,12 +1,16 @@
 /**
- * Human-mode Agent Runner — Hybrid Vision Architecture v2
+ * Human-mode Agent Runner — Hybrid Vision Architecture v3
  *
  * Step 1a — Perception    : Qwen3-VL  → screenshot → screen state / errors / layout (Korean OCR)
- * Step 1b — A11y Snapshot : Playwright accessibility.snapshot() → compact @ref element list
- * Step 2  — Planning      : GPT-4o    → Qwen context + @refs → next action JSON
+ * Step 1b — A11y Snapshot : CDP Accessibility.getFullAXTree → compact @ref element list (cached per URL)
+ * Step 2  — Planning      : GPT-4o    → Qwen context + @refs + compressed history → next action JSON
  * Step 3  — Execution     : Playwright getByRole / getByLabel → multi-strategy fallback
- * Step 3b — Reflection    : failed action error is injected into next planning prompt
- *           Stall guard   : same action repeated 3× → force scroll/wait
+ * Step 3b — Validation    : GPT-4o-mini vision → did the action actually work? (retry up to 2×)
+ *
+ * Improvements v3:
+ *  ① Validator Agent   — lightweight post-action verification, retry on failure
+ *  ② Context overflow  — goal pinned in system prompt, history compressed beyond 4 steps
+ *  ③ A11y caching      — skip re-scan when URL hasn't changed
  */
 
 import { chromium, type Browser, type Page } from "playwright";
@@ -28,7 +32,7 @@ export type HumanAction =
 
 export interface ActionDecision {
   action: HumanAction;
-  target?: string;   // @eN ref or URL or key
+  target?: string;
   value?: string;
   description: string;
   observation: string;
@@ -70,12 +74,18 @@ export interface HumanAgentConfig {
 
 // ─── A11y Ref ─────────────────────────────────────────────────
 interface A11yRef {
-  ref: string;       // @e1, @e2, ...
-  role: string;      // button | link | textbox | checkbox | ...
-  name: string;      // accessible name (label / aria-label / text)
-  value?: string;    // current input value
+  ref: string;
+  role: string;
+  name: string;
+  value?: string;
   checked?: boolean;
   expanded?: boolean;
+}
+
+interface ValidationResult {
+  succeeded: boolean;
+  observation: string;
+  suggestion?: string;
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -85,40 +95,40 @@ const INTERACTIVE_ROLES = new Set([
   "tab", "option", "listbox", "treeitem",
 ]);
 
-// ─── GPT-4o Planning System Prompt ───────────────────────────
-const PLANNING_SYSTEM = `You are an expert QA tester operating a web browser.
+// Actions that may change page structure → invalidate A11y cache
+const CACHE_BUSTING_ACTIONS = new Set<HumanAction>(["navigate", "click", "press"]);
+
+// ─── Planning System Prompt ───────────────────────────────────
+// Note: goal is injected at runtime so it stays salient every step
+function buildPlanningSystem(goal: string, categories: string[], customPrompt: string): string {
+  const categoryLine = categories.length ? `\nFocus areas: ${categories.join(", ")}` : "";
+  const customLine = customPrompt ? `\nAdditional instructions: ${customPrompt}` : "";
+
+  return `You are an expert QA tester operating a web browser.
+YOUR GOAL (never forget this): "${goal}"${categoryLine}${customLine}
 
 Each step you receive:
   1. A11Y_REFS — interactive elements from the live accessibility tree.
      Each has a short @eN reference. Use ONLY these refs as "target" for click/fill.
   2. SCREEN_DESCRIPTION — Korean OCR + visual context from Qwen3-VL.
-     Use this to understand page state, errors, messages, flow.
-     Never use selectors or refs from SCREEN_DESCRIPTION — only A11Y_REFS refs are valid.
+     Use for understanding page state, errors, messages, and flow.
+     NEVER use selectors from SCREEN_DESCRIPTION — only A11Y_REFS refs are valid.
 
 Rules:
-- "target" must be an @eN ref from A11Y_REFS (or a URL for navigate).
-- If the element you need is not in A11Y_REFS, use scroll/wait first.
-- If the previous action FAILED, try a completely different approach.
-- Detect and report real bugs (wrong error messages, missing features, broken flows).
+- "target" must be an @eN ref from A11Y_REFS (or a full URL for navigate).
+- If the element you need is not listed, use scroll or wait first.
+- If the previous action FAILED or was UNVERIFIED, try a completely different approach.
+- Detect and report real bugs: wrong errors, missing features, broken flows.
 
 Respond with ONLY raw JSON (no markdown, no code fences):
 {
   "action": "click" | "fill" | "navigate" | "wait" | "scroll" | "press" | "done" | "fail",
-  "target": "@eN ref from A11Y_REFS  |  full URL for navigate",
-  "value": "text to type  |  ms to wait  |  pixels to scroll  |  key name",
+  "target": "@eN ref  |  full URL for navigate",
+  "value": "text to type  |  ms  |  pixels  |  key name",
   "description": "what you are doing and why",
   "observation": "brief summary of current screen state"
+}`;
 }
-
-Action guide:
-- click    : target = @eN (button or link)
-- fill     : target = @eN (textbox/combobox), value = text to enter
-- navigate : value = full URL (no target needed)
-- wait     : value = milliseconds e.g. "2000"
-- scroll   : value = pixels to scroll down e.g. "500"
-- press    : value = Enter | Tab | Escape
-- done     : goal fully achieved and verified
-- fail     : real bug found or goal is impossible — describe clearly`;
 
 // ─── Runner ────────────────────────────────────────────────────
 export class HumanAgentRunner {
@@ -127,14 +137,14 @@ export class HumanAgentRunner {
   private page: Page | null = null;
   private sessionId: string;
   private steps: HumanStep[] = [];
-  private actionHistory: string[] = [];
+  private actionHistory: string[] = [];      // full log
+  private accomplishments: string[] = [];    // compressed older steps
 
-  // Reflection & stall detection state
-  private lastFailureError: string | null = null;
-  private recentActionKeys: string[] = []; // last 3 "action:target" strings
+  private lastFailureContext: string | null = null;
+  private recentActionKeys: string[] = [];   // for stall detection
 
-  // Current step's ref map (rebuilt each step)
   private refMap: Map<string, A11yRef> = new Map();
+  private a11yCache: { url: string; refs: A11yRef[] } | null = null;  // ③ cache
 
   constructor(config: HumanAgentConfig) {
     this.config = config;
@@ -168,20 +178,20 @@ export class HumanAgentRunner {
       for (let step = 1; step <= maxSteps; step++) {
         const stepStart = Date.now();
 
-        // ── Stall guard: force scroll if stuck ────────────────
+        // ── Stall guard ────────────────────────────────────────
         if (this._isStalled()) {
-          logger.warn("Stall detected — injecting scroll");
+          logger.warn("Stall detected — forcing scroll");
           await this.page.evaluate(() => window.scrollBy(0, 400));
           await this.page.waitForTimeout(600);
           this.recentActionKeys = [];
         }
 
-        // ── Step 1: Screenshot + Qwen perception + A11y (parallel)
+        // ── Step 1: Screenshot + Qwen + A11y (parallel) ───────
         const { base64, publicPath } = await this._screenshot(`step${step}`);
         const percStart = Date.now();
         const [perception, a11yRefs] = await Promise.all([
           perceiveScreen(base64, this.page.url()),
-          this._snapshotA11y(),
+          this._snapshotA11y(false),   // false = use cache if available
         ]);
         const perceptionMs = Date.now() - percStart;
 
@@ -190,15 +200,32 @@ export class HumanAgentRunner {
         const decision = await this._plan(perception, a11yRefs, step, maxSteps);
         const planningMs = Date.now() - planStart;
 
-        // Track action key for stall detection
         this.recentActionKeys.push(`${decision.action}:${decision.target ?? ""}`);
         if (this.recentActionKeys.length > 3) this.recentActionKeys.shift();
 
-        // ── Step 3: Execution ──────────────────────────────────
-        const { success, error } = await this._execute(decision);
+        // ── Step 3: Execution + Validation ────────────────────
+        const preUrl = this.page.url();
+        let { success, error } = await this._execute(decision);
+        this.lastFailureContext = null;
 
-        // Reflection: store failure for next planning step
-        this.lastFailureError = success ? null : (error ?? "unknown error");
+        // Invalidate A11y cache after actions that may change the DOM
+        if (CACHE_BUSTING_ACTIONS.has(decision.action)) {
+          this.a11yCache = null;
+        }
+
+        // ① Validator Agent: verify result for key actions
+        if (success && ["click", "fill", "navigate"].includes(decision.action)) {
+          const validation = await this._validate(decision, preUrl);
+          if (!validation.succeeded) {
+            this.lastFailureContext =
+              `Action appeared to execute but validation failed: ${validation.observation}.` +
+              (validation.suggestion ? ` Try: ${validation.suggestion}` : "");
+            success = false;
+            error = validation.observation;
+          }
+        } else if (!success) {
+          this.lastFailureContext = `Execution error: ${error}`;
+        }
 
         const humanStep: HumanStep = {
           stepNumber: step,
@@ -215,10 +242,21 @@ export class HumanAgentRunner {
         this.steps.push(humanStep);
         this.config.onStep?.(humanStep);
 
-        this.actionHistory.push(
+        const historyLine =
           `Step ${step} [${decision.action}${decision.target ? " " + decision.target : ""}]: ${decision.description}` +
-          (error ? ` ← FAILED: ${error}` : " ✓")
-        );
+          (error ? ` ← FAILED: ${error}` : " ✓");
+        this.actionHistory.push(historyLine);
+
+        // ② Compress history: keep last 4 full, summarise older
+        if (this.actionHistory.length > 4) {
+          const oldest = this.actionHistory.shift()!;
+          const succeeded = !oldest.includes("FAILED");
+          this.accomplishments.push(
+            succeeded
+              ? oldest.replace(/Step \d+ /, "").split(":").slice(1).join(":").trim()
+              : `[FAILED] ${oldest.split(":").slice(1).join(":").trim()}`
+          );
+        }
 
         if (decision.action === "done") { status = "done"; summary = decision.description; break; }
         if (decision.action === "fail") { status = "fail"; summary = decision.description; break; }
@@ -244,8 +282,54 @@ export class HumanAgentRunner {
     }
   }
 
-  // ── A11y snapshot via CDP → compact @ref list ────────────
-  private async _snapshotA11y(): Promise<A11yRef[]> {
+  // ── ① Validator Agent ─────────────────────────────────────
+  private async _validate(action: ActionDecision, preUrl: string): Promise<ValidationResult> {
+    try {
+      const postUrl = this.page!.url();
+      const buffer = await this.page!.screenshot({ fullPage: false, type: "png" });
+      const base64 = buffer.toString("base64");
+
+      const response = await openAIClient().chat.completions.create({
+        model: "gpt-4o-mini",
+        max_tokens: 200,
+        messages: [
+          {
+            role: "system",
+            content: `You are a QA validator checking if a browser action succeeded.
+Respond with ONLY raw JSON (no markdown):
+{"succeeded": true/false, "observation": "what you see now", "suggestion": "alternative if failed"}`,
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  `Action: [${action.action}] ${action.description}\n` +
+                  `URL before: ${preUrl}\nURL after: ${postUrl}\n` +
+                  `Did this action succeed? Is the page in the expected state?`,
+              },
+              { type: "image_url", image_url: { url: `data:image/png;base64,${base64}` } },
+            ],
+          },
+        ],
+      });
+
+      const raw = response.choices[0]?.message?.content ?? "";
+      return extractJSON<ValidationResult>(raw);
+    } catch {
+      return { succeeded: true, observation: "validation skipped" };
+    }
+  }
+
+  // ── ③ A11y snapshot with URL-based cache ─────────────────
+  private async _snapshotA11y(forceRefresh: boolean): Promise<A11yRef[]> {
+    const currentUrl = this.page?.url() ?? "";
+
+    if (!forceRefresh && this.a11yCache?.url === currentUrl) {
+      return this.a11yCache.refs; // cache hit — no CDP round-trip
+    }
+
     this.refMap.clear();
     const refs: A11yRef[] = [];
     let counter = 1;
@@ -257,7 +341,6 @@ export class HumanAgentRunner {
       name?: { value: string };
       value?: { value: string };
       properties?: Array<{ name: string; value: { value: unknown } }>;
-      childIds?: string[];
     };
 
     try {
@@ -272,7 +355,6 @@ export class HumanAgentRunner {
 
         if (!INTERACTIVE_ROLES.has(role)) continue;
 
-        // Skip disabled elements
         const disabled = node.properties?.find(p => p.name === "disabled")?.value?.value;
         if (disabled === true) continue;
 
@@ -295,14 +377,34 @@ export class HumanAgentRunner {
       logger.warn({ e }, "A11y CDP snapshot failed");
     }
 
-    return refs.slice(0, 60); // cap to avoid overwhelming GPT-4o
+    const capped = refs.slice(0, 60);
+    this.a11yCache = { url: currentUrl, refs: capped };
+    return capped;
   }
 
-  // ── Stall detection ────────────────────────────────────────
+  // ── ② Compressed history builder ─────────────────────────
+  private _buildHistoryText(): string {
+    const lines: string[] = [];
+
+    if (this.accomplishments.length) {
+      lines.push(
+        `[이전 ${this.accomplishments.length}스텝 요약] ` +
+        this.accomplishments.slice(-5).join(" → ")
+      );
+    }
+
+    if (this.actionHistory.length) {
+      lines.push("Recent steps:");
+      lines.push(...this.actionHistory); // at most 4 full entries
+    }
+
+    return lines.length ? "\n" + lines.join("\n") : "";
+  }
+
   private _isStalled(): boolean {
     if (this.recentActionKeys.length < 3) return false;
     const [a, b, c] = this.recentActionKeys;
-    return a === b && b === c && a !== "scroll:" && a !== "wait:";
+    return a === b && b === c && !a.startsWith("scroll:") && !a.startsWith("wait:");
   }
 
   private async _tryLogin(): Promise<void> {
@@ -337,30 +439,18 @@ export class HumanAgentRunner {
     perception: string,
     a11yRefs: A11yRef[],
     stepNum: number,
-    maxSteps: number
+    maxSteps: number,
   ): Promise<ActionDecision> {
-    const historyText = this.actionHistory.length
-      ? `\nPrevious steps:\n${this.actionHistory.slice(-6).join("\n")}`
-      : "";
+    const historyText = this._buildHistoryText();
 
-    const categoryText = this.config.categories?.length
-      ? `\nFocus areas: ${this.config.categories.join(", ")}`
+    const failureText = this.lastFailureContext
+      ? `\n\n⚠️ PREVIOUS ACTION FAILED: "${this.lastFailureContext}"\nTry a completely different approach.`
       : "";
 
     const sheetText = this.config.sheetRawTable
       ? `\n\n--- TEST SHEET ---\n${this.config.sheetRawTable}`
       : "";
 
-    const customText = this.config.customPrompt
-      ? `\n\nAdditional instructions: ${this.config.customPrompt}`
-      : "";
-
-    // Reflection: inject failure context
-    const reflectionText = this.lastFailureError
-      ? `\n\n⚠️ PREVIOUS ACTION FAILED: "${this.lastFailureError}"\nTry a completely different approach — do not repeat the same action.`
-      : "";
-
-    // Compact @ref list
     const refsText = a11yRefs.length
       ? a11yRefs.map(r => {
           let line = `${r.ref} [${r.role}] "${r.name}"`;
@@ -372,25 +462,30 @@ export class HumanAgentRunner {
       : "(no interactive elements — try scroll or wait)";
 
     const userMessage = [
-      `Goal: "${this.config.goal}"${categoryText}`,
       `Current URL: ${this.page?.url()}`,
-      `Step: ${stepNum}/${maxSteps}${historyText}${sheetText}${customText}${reflectionText}`,
+      `Step: ${stepNum}/${maxSteps}${historyText}${sheetText}${failureText}`,
       "",
       "--- A11Y_REFS (use ONLY these @eN refs as target) ---",
       refsText,
       "",
-      "--- SCREEN_DESCRIPTION from Qwen3-VL (visual context + Korean OCR — DO NOT use its element refs) ---",
+      "--- SCREEN_DESCRIPTION from Qwen3-VL (visual context + Korean OCR) ---",
       perception,
       "",
       "Decide the next action.",
     ].join("\n");
+
+    const systemPrompt = buildPlanningSystem(
+      this.config.goal,
+      this.config.categories ?? [],
+      this.config.customPrompt ?? "",
+    );
 
     try {
       const response = await openAIClient().chat.completions.create({
         model: "gpt-4o",
         max_tokens: 512,
         messages: [
-          { role: "system", content: PLANNING_SYSTEM },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
       });
@@ -411,7 +506,7 @@ export class HumanAgentRunner {
           break;
 
         case "click": {
-          const clicked = await this._resolveAndClick(p, d.target ?? "");
+          const clicked = await this._resolveAndClick(p, d.target ?? "", d.value ?? d.description);
           if (!clicked) throw new Error(`클릭 실패: ${d.target}`);
           await p.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => {});
           break;
@@ -447,94 +542,45 @@ export class HumanAgentRunner {
     }
   }
 
-  /**
-   * Click resolution chain (A11y-first):
-   * 1. @eN ref → getByRole(role, {name}) from a11y tree
-   * 2. getByRole("button", {name: hint})
-   * 3. getByRole("link", {name: hint})
-   * 4. getByText(hint)
-   * 5. getByLabel(hint)
-   */
-  private async _resolveAndClick(p: Page, target: string): Promise<boolean> {
-    // 1. Resolve @eN ref via a11y map
+  private async _resolveAndClick(p: Page, target: string, hint: string): Promise<boolean> {
     if (target.startsWith("@e")) {
       const ref = this.refMap.get(target);
       if (ref) {
         try {
-          const loc = p.getByRole(ref.role as Parameters<typeof p.getByRole>[0], {
-            name: ref.name,
-            exact: false,
-          });
-          if (await loc.count() > 0) {
-            await loc.first().click({ timeout: 6_000 });
-            return true;
-          }
+          const loc = p.getByRole(ref.role as Parameters<typeof p.getByRole>[0], { name: ref.name, exact: false });
+          if (await loc.count() > 0) { await loc.first().click({ timeout: 6_000 }); return true; }
         } catch { /* fall through */ }
       }
     }
 
-    // Derive hint text from target string or ref name
-    const hint = (this.refMap.get(target)?.name) ?? target;
+    const hintText = this.refMap.get(target)?.name ?? hint;
 
-    // 2. getByRole button
-    if (hint) {
+    for (const attempt of [
+      () => p.getByRole("button", { name: hintText, exact: false }),
+      () => p.getByRole("link", { name: hintText, exact: false }),
+      () => p.getByText(hintText, { exact: false }),
+      () => p.getByLabel(hintText, { exact: false }),
+    ]) {
       try {
-        const loc = p.getByRole("button", { name: hint, exact: false });
+        const loc = attempt();
         if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
-      } catch { /* fall through */ }
-    }
-
-    // 3. getByRole link
-    if (hint) {
-      try {
-        const loc = p.getByRole("link", { name: hint, exact: false });
-        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
-      } catch { /* fall through */ }
-    }
-
-    // 4. getByText
-    if (hint) {
-      try {
-        const loc = p.getByText(hint, { exact: false });
-        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
-      } catch { /* fall through */ }
-    }
-
-    // 5. getByLabel
-    if (hint) {
-      try {
-        const loc = p.getByLabel(hint, { exact: false });
-        if (await loc.count() > 0) { await loc.first().click({ timeout: 5_000 }); return true; }
-      } catch { /* fall through */ }
+      } catch { /* try next */ }
     }
 
     return false;
   }
 
-  /**
-   * Fill resolution chain (A11y-first):
-   * 1. @eN ref → getByRole("textbox" | "searchbox" | "combobox", {name})
-   * 2. getByLabel(name)
-   * 3. getByPlaceholder(name)
-   * 4. first visible input/textarea
-   */
   private async _resolveAndFill(p: Page, target: string, value: string): Promise<boolean> {
-    // 1. Resolve @eN ref
     if (target.startsWith("@e")) {
       const ref = this.refMap.get(target);
       if (ref) {
-        const fillRoles = ["textbox", "searchbox", "combobox", "spinbutton"] as const;
-        for (const role of fillRoles) {
+        for (const role of ["textbox", "searchbox", "combobox", "spinbutton"] as const) {
           if (ref.role !== role) continue;
           try {
             const loc = p.getByRole(role, { name: ref.name, exact: false });
-            if (await loc.count() > 0) {
-              await loc.first().fill(value, { timeout: 6_000 });
-              return true;
-            }
+            if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
           } catch { /* try next */ }
         }
-        // fallback: getByLabel with ref name
         if (ref.name) {
           try {
             const loc = p.getByLabel(ref.name, { exact: false });
@@ -544,29 +590,18 @@ export class HumanAgentRunner {
       }
     }
 
-    const hint = (this.refMap.get(target)?.name) ?? target;
+    const hint = this.refMap.get(target)?.name ?? target;
 
-    // 2. getByLabel
-    if (hint && !hint.startsWith("@")) {
+    for (const attempt of [
+      () => hint && !hint.startsWith("@") ? p.getByLabel(hint, { exact: false }) : null,
+      () => hint && !hint.startsWith("@") ? p.getByPlaceholder(hint, { exact: false }) : null,
+      () => p.locator("textarea:visible, input:not([type=hidden]):not([type=submit]):visible").first(),
+    ]) {
       try {
-        const loc = p.getByLabel(hint, { exact: false });
-        if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
-      } catch { /* fall through */ }
+        const loc = attempt();
+        if (loc && await loc.count() > 0) { await loc.fill(value, { timeout: 6_000 }); return true; }
+      } catch { /* try next */ }
     }
-
-    // 3. getByPlaceholder
-    if (hint && !hint.startsWith("@")) {
-      try {
-        const loc = p.getByPlaceholder(hint, { exact: false });
-        if (await loc.count() > 0) { await loc.first().fill(value, { timeout: 6_000 }); return true; }
-      } catch { /* fall through */ }
-    }
-
-    // 4. First visible input/textarea
-    try {
-      const loc = p.locator("textarea:visible, input:not([type=hidden]):not([type=submit]):visible").first();
-      if (await loc.count() > 0) { await loc.fill(value, { timeout: 6_000 }); return true; }
-    } catch { /* fall through */ }
 
     return false;
   }
