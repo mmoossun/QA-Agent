@@ -21,6 +21,7 @@ export interface AgentRunConfig {
   customPrompt?: string;          // natural language user instructions
   directScenarios?: QAScenario[]; // already-complete scenarios from uploaded file
   scenarioHints?: string[];       // text descriptions from uploaded file for AI to expand
+  sheetRawTable?: string;         // raw markdown table from xlsx for AI to interpret freely
   reportLanguage?: "ko" | "en";  // language for AI-generated summary & recommendations
 }
 
@@ -86,7 +87,7 @@ export class AgentRunner {
         this.config.targetUrl,
         this.config.scenarioCategories,
         { email: this.config.loginEmail, password: this.config.loginPassword },
-        { customPrompt: this.config.customPrompt, scenarioHints: this.config.scenarioHints }
+        { customPrompt: this.config.customPrompt, scenarioHints: this.config.scenarioHints, sheetRawTable: this.config.sheetRawTable }
       );
       // Merge: file scenarios run in addition to AI-generated (not counted against maxScenarios)
       const direct = this.config.directScenarios ?? [];

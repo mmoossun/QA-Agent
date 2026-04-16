@@ -19,6 +19,7 @@ const RequestSchema = z.object({
   scenarioCategories: z.array(z.string()).optional(),
   customPrompt: z.string().max(2000).optional(),
   scenarioHints: z.array(z.string()).optional(),
+  sheetRawTable: z.string().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -33,7 +34,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories, customPrompt, scenarioHints } = parsed.data;
+    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories, customPrompt, scenarioHints, sheetRawTable } = parsed.data;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -76,7 +77,7 @@ export async function POST(req: NextRequest) {
               targetUrl,
               scenarioCategories,
               { email: loginEmail, password: loginPassword },
-              { customPrompt, scenarioHints }
+              { customPrompt, scenarioHints, sheetRawTable }
             )
           ).slice(0, maxScenarios);
 

@@ -14,7 +14,7 @@ export class ScenarioGenerator {
     targetUrl: string,
     categories?: string[],
     credentials?: { email?: string; password?: string },
-    options?: { customPrompt?: string; scenarioHints?: string[] }
+    options?: { customPrompt?: string; scenarioHints?: string[]; sheetRawTable?: string }
   ): Promise<QAScenario[]> {
     logger.info({ url: targetUrl, routes: structure.routes.length, categories }, "Generating scenarios");
 
@@ -26,11 +26,15 @@ export class ScenarioGenerator {
       ? `\n\nADDITIONAL TEST CASES TO COVER (from uploaded scenario sheet — generate proper Playwright steps for each):\n${options.scenarioHints.map((h, i) => `${i + 1}. ${h}`).join("\n")}`
       : "";
 
+    const rawTableSection = options?.sheetRawTable
+      ? `\n\nUPLOADED TEST SHEET (raw table — analyze all columns freely, infer test cases from any structure):\n${options.sheetRawTable}\n\nInterpret this table however makes sense — column names may be in Korean or English, any format. Extract as many meaningful test scenarios as possible.`
+      : "";
+
     const customSection = options?.customPrompt?.trim()
       ? `\n\nUSER INSTRUCTIONS (follow these specific requirements):\n${options.customPrompt.trim()}`
       : "";
 
-    const prompt = buildScenarioGenPrompt(structure, credentials) + categoryHint + hintsSection + customSection;
+    const prompt = buildScenarioGenPrompt(structure, credentials) + categoryHint + hintsSection + rawTableSection + customSection;
 
     const response = await chat(
       [{ role: "user", content: prompt }],

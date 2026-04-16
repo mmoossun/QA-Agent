@@ -46,6 +46,7 @@ interface TargetResult {
 interface ParsedSheet {
   direct: QAScenario[];  // fully-specified scenarios (already have Playwright steps)
   hints: string[];       // text descriptions for AI to expand
+  rawTable?: string;     // raw table from xlsx/csv for AI to interpret freely
   fileName: string;
   rowCount: number;
 }
@@ -91,26 +92,16 @@ async function parseScenarioFile(file: File): Promise<ParsedSheet & { error?: st
     if (rows.length === 0)
       return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "엑셀 파일이 비어있습니다" };
 
-    const headers = Object.keys(rows[0]).map((h) => h.toLowerCase());
-    const nameKey = Object.keys(rows[0]).find((k) => ["name", "테스트명"].includes(k.toLowerCase()));
-    if (!nameKey)
-      return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: '"name" 또는 "테스트명" 컬럼이 필요합니다' };
+    // Convert to markdown table — pass raw data to AI for free-form interpretation
+    const headers = Object.keys(rows[0]);
+    const header  = `| ${headers.join(" | ")} |`;
+    const divider = `| ${headers.map(() => "---").join(" | ")} |`;
+    const dataRows = rows.slice(0, 100).map(
+      (r) => `| ${headers.map((h) => String(r[h] ?? "").replace(/\|/g, "｜")).join(" | ")} |`
+    );
+    const rawTable = [header, divider, ...dataRows].join("\n");
 
-    const descKey = Object.keys(rows[0]).find((k) => ["description", "설명"].includes(k.toLowerCase()));
-    const catKey  = Object.keys(rows[0]).find((k) => ["category", "카테고리"].includes(k.toLowerCase()));
-    const priKey  = Object.keys(rows[0]).find((k) => ["priority", "우선순위"].includes(k.toLowerCase()));
-
-    void headers; // used implicitly via key lookups above
-
-    const hints = rows.map((r) => {
-      const parts = [r[nameKey]];
-      if (descKey && r[descKey]) parts.push(`(${r[descKey]})`);
-      if (catKey  && r[catKey])  parts.push(`[카테고리:${r[catKey]}]`);
-      if (priKey  && r[priKey])  parts.push(`[우선순위:${r[priKey]}]`);
-      return parts.join(" ").trim();
-    }).filter(Boolean);
-
-    return { direct: [], hints, fileName: file.name, rowCount: hints.length };
+    return { direct: [], hints: [], rawTable, fileName: file.name, rowCount: rows.length };
   }
 
   const text = await file.text();
@@ -248,6 +239,7 @@ export default function AgentPage() {
     customPrompt:   customPrompt.trim()   || undefined,
     directScenarios: sheet?.direct.length ? sheet.direct : undefined,
     scenarioHints:   sheet?.hints.length  ? sheet.hints  : undefined,
+    sheetRawTable:   sheet?.rawTable      || undefined,
     reportLanguage,
   });
 
@@ -326,7 +318,8 @@ export default function AgentPage() {
           maxScenarios,
           scenarioCategories: Array.from(categories),
           customPrompt:  customPrompt.trim()  || undefined,
-          scenarioHints: sheet?.hints.length  ? sheet.hints : undefined,
+          scenarioHints:  sheet?.hints.length  ? sheet.hints  : undefined,
+          sheetRawTable:  sheet?.rawTable       || undefined,
         }),
       });
       if (!res.body) throw new Error("No response body");
@@ -412,6 +405,8 @@ export default function AgentPage() {
                     <p className="text-xs text-green-600 mt-0.5">
                       {sheet.direct.length > 0
                         ? `${sheet.direct.length}개 시나리오 (완전 형식) 로드됨`
+                        : sheet.rawTable
+                        ? `${sheet.rowCount}행 테이블 → AI가 자유 해석 후 시나리오 생성`
                         : `${sheet.hints.length}개 테스트 케이스 → AI가 Playwright 단계로 변환`}
                     </p>
                   </div>

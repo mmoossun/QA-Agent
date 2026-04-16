@@ -19,6 +19,7 @@ const RequestSchema = z.object({
   customPrompt: z.string().max(2000).optional(),
   directScenarios: z.array(z.any()).optional(),
   scenarioHints: z.array(z.string()).optional(),
+  sheetRawTable: z.string().optional(),
   reportLanguage: z.enum(["ko", "en"]).default("ko"),
 });
 
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories, customPrompt, directScenarios, scenarioHints, reportLanguage } = parsed.data;
+    const { targetUrl, loginEmail, loginPassword, maxScenarios, scenarioCategories, customPrompt, directScenarios, scenarioHints, sheetRawTable, reportLanguage } = parsed.data;
 
     // Server-Sent Events for real-time progress
     const encoder = new TextEncoder();
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest) {
             customPrompt,
             directScenarios: directScenarios as import("@/lib/ai/types").QAScenario[] | undefined,
             scenarioHints,
+            sheetRawTable,
             reportLanguage,
             onProgress: (status: AgentStatus) => {
               send({ type: "progress", ...status });
