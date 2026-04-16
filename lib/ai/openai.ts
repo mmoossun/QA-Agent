@@ -76,4 +76,47 @@ export async function chatOpenAI(
   return text;
 }
 
+/**
+ * GPT-4o Vision — send screenshot + text, get next action
+ * Uses Chat Completions API (supports image inputs)
+ */
+export async function chatWithVision(
+  systemPrompt: string,
+  textMessages: { role: "user" | "assistant"; content: string }[],
+  imageBase64: string,          // latest screenshot as base64 PNG
+  options: { model?: string; maxTokens?: number } = {}
+): Promise<string> {
+  const { model = "gpt-4o", maxTokens = 1024 } = options;
+  const start = Date.now();
+
+  // Build messages: history as text + final user message with image
+  const history = textMessages.slice(0, -1).map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
+
+  const lastText = textMessages[textMessages.length - 1]?.content ?? "";
+
+  const response = await getClient().chat.completions.create({
+    model,
+    max_tokens: maxTokens,
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...history,
+      {
+        role: "user",
+        content: [
+          { type: "text", text: lastText },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${imageBase64}`, detail: "high" } },
+        ],
+      },
+    ],
+  });
+
+  const text = response.choices[0]?.message?.content ?? "";
+  const usage = response.usage;
+  console.log(`[GPT-4o Vision] ${model} — ${Date.now() - start}ms | in:${usage?.prompt_tokens ?? "?"} out:${usage?.completion_tokens ?? "?"}`);
+  return text;
+}
+
 export { getClient as openAIClient };
