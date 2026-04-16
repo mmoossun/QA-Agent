@@ -39,7 +39,7 @@ function writeEnvKey(key: string, value: string): void {
 
 export async function GET() {
   const env = readEnv();
-  const provider = (env["AI_PROVIDER"] ?? "claude").toLowerCase();
+  const provider = (env["AI_PROVIDER"] ?? "openai").toLowerCase();
   const active = provider === "openai" ? "openai" : "claude";
   const hasOpenAI = !!(env["OPENAI_API_KEY"] && env["OPENAI_API_KEY"] !== "your-key-here");
   const hasClaude = !!(env["ANTHROPIC_API_KEY"] && env["ANTHROPIC_API_KEY"] !== "your-key-here");
