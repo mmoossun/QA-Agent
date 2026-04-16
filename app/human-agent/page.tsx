@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import type { HumanStep, HumanAgentResult } from "@/lib/human-agent/runner";
+import type { TestCase } from "@/lib/google-sheets";
 
 // ─── Types ─────────────────────────────────────────────────────
 interface TargetEntry {
@@ -10,15 +11,17 @@ interface TargetEntry {
   loginEmail: string; loginPassword: string; enabled: boolean;
 }
 
-type Category = "auth" | "form" | "ui" | "navigation" | "security" | "api" | "performance";
-const CATEGORIES: { id: Category; label: string; emoji: string }[] = [
-  { id: "auth",        label: "인증",      emoji: "🔐" },
-  { id: "form",        label: "폼",        emoji: "📝" },
-  { id: "ui",          label: "UI",        emoji: "🎨" },
-  { id: "navigation",  label: "네비게이션", emoji: "🗺️" },
-  { id: "security",    label: "보안",      emoji: "🛡️" },
-  { id: "api",         label: "API",       emoji: "⚡" },
-  { id: "performance", label: "성능",      emoji: "📈" },
+type Mode = "generate" | "run";
+
+type Category = "기능 테스트" | "UI/UX" | "엣지 케이스" | "보안" | "성능" | "접근성" | "회귀";
+const CATEGORIES: { id: Category; emoji: string }[] = [
+  { id: "기능 테스트", emoji: "⚙️" },
+  { id: "UI/UX",      emoji: "🎨" },
+  { id: "엣지 케이스", emoji: "🔬" },
+  { id: "보안",       emoji: "🛡️" },
+  { id: "성능",       emoji: "📈" },
+  { id: "접근성",     emoji: "♿" },
+  { id: "회귀",       emoji: "🔁" },
 ];
 
 interface ParsedSheet { rawTable?: string; fileName: string; rowCount: number; }
@@ -46,8 +49,13 @@ const ACTION_ICONS: Record<string, string> = {
   click: "👆", fill: "✏️", navigate: "🌐", wait: "⏳",
   scroll: "📜", press: "⌨️", done: "✅", fail: "❌",
 };
+const PRIORITY_COLORS: Record<string, string> = {
+  High: "bg-red-100 text-red-700",
+  Medium: "bg-yellow-100 text-yellow-700",
+  Low: "bg-green-100 text-green-700",
+};
 
-// ─── File parsing (reused from Auto Agent) ────────────────────
+// ─── File parsing ─────────────────────────────────────────────
 function parseCSVLine(line: string, sep = ","): string[] {
   const res: string[] = []; let cur = ""; let inQ = false;
   for (const ch of line) {
@@ -95,9 +103,10 @@ async function parseSheet(file: File): Promise<ParsedSheet & { error?: string }>
 
 // ─── Page ──────────────────────────────────────────────────────
 export default function HumanAgentPage() {
+  // ── Shared state ──────────────────────────────────────────
+  const [mode, setMode]                 = useState<Mode>("generate");
   const [targets, setTargets]           = useState<TargetEntry[]>(DEFAULT_TARGETS);
   const [goal, setGoal]                 = useState("채팅 위젯을 열고 '안녕하세요' 메시지를 보낸 후 응답을 확인해줘");
-  const [maxSteps, setMaxSteps]         = useState(20);
   const [categories, setCategories]     = useState<Set<Category>>(new Set(CATEGORIES.map(c => c.id)));
   const [customPrompt, setCustomPrompt] = useState("");
   const [sheet, setSheet]               = useState<ParsedSheet | null>(null);
@@ -105,13 +114,26 @@ export default function HumanAgentPage() {
   const [panelOpen, setPanelOpen]       = useState(true);
   const fileRef                         = useRef<HTMLInputElement>(null);
 
+  // ── Generate mode state ───────────────────────────────────
+  const [caseCount, setCaseCount]       = useState(10);
+  const [testCases, setTestCases]       = useState<TestCase[]>([]);
+  const [generating, setGenerating]     = useState(false);
+  const [genError, setGenError]         = useState<string | null>(null);
+  const [sheetId, setSheetId]           = useState("");
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [exporting, setExporting]       = useState(false);
+  const [importStatus, setImportStatus] = useState<string | null>(null);
+  const [importing, setImporting]       = useState(false);
+
+  // ── Run mode state ────────────────────────────────────────
+  const [maxSteps, setMaxSteps]         = useState(20);
   const [runs, setRuns]                 = useState<TargetRun[]>([]);
   const [running, setRunning]           = useState(false);
   const [activeTab, setActiveTab]       = useState<string>("");
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const bottomRef                       = useRef<HTMLDivElement>(null);
 
-  // ── Target helpers ─────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────
   const addTarget = () => setTargets(p => [...p, { id: `t${Date.now()}`, label: `URL ${p.length + 1}`, url: "", loginEmail: "", loginPassword: "", enabled: true }]);
   const removeTarget = (id: string) => setTargets(p => p.filter(t => t.id !== id));
   const updateTarget = <K extends keyof TargetEntry>(id: string, f: K, v: TargetEntry[K]) =>
@@ -119,7 +141,6 @@ export default function HumanAgentPage() {
   const toggleCategory = (cat: Category) =>
     setCategories(p => { const n = new Set(p); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
 
-  // ── File upload ────────────────────────────────────────────
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return;
     setFileError(null);
@@ -129,8 +150,90 @@ export default function HumanAgentPage() {
     e.target.value = "";
   };
 
-  // ── Run ────────────────────────────────────────────────────
-  const start = async () => {
+  const primaryUrl = targets.find(t => t.enabled && t.url.trim())?.url ?? "";
+
+  // ── Generate test cases ───────────────────────────────────
+  const generate = async () => {
+    if (!primaryUrl || !goal.trim() || generating) return;
+    setGenerating(true);
+    setGenError(null);
+    setTestCases([]);
+    try {
+      const res = await fetch("/api/human-agent/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetUrl: primaryUrl,
+          goal: goal.trim(),
+          categories: Array.from(categories),
+          customPrompt: customPrompt.trim() || undefined,
+          sheetRawTable: sheet?.rawTable || undefined,
+          count: caseCount,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "생성 실패");
+      setTestCases(data.testCases ?? []);
+    } catch (e) {
+      setGenError(String(e));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // ── Export to Google Sheets ───────────────────────────────
+  const exportToSheets = async () => {
+    if (!sheetId.trim() || testCases.length === 0 || exporting) return;
+    setExporting(true);
+    setExportStatus(null);
+    try {
+      const res = await fetch("/api/google-sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetId: sheetId.trim(), testCases }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "내보내기 실패");
+      setExportStatus(`✅ ${data.appended}개 테스트 케이스가 시트에 추가됐습니다`);
+    } catch (e) {
+      setExportStatus(`❌ ${String(e)}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // ── Import from Google Sheets ─────────────────────────────
+  const importFromSheets = async () => {
+    if (!sheetId.trim() || importing) return;
+    setImporting(true);
+    setImportStatus(null);
+    try {
+      const res = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "불러오기 실패");
+      setTestCases(data.testCases ?? []);
+      setImportStatus(`✅ ${data.testCases?.length ?? 0}개 테스트 케이스를 불러왔습니다`);
+    } catch (e) {
+      setImportStatus(`❌ ${String(e)}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // ── Export to CSV ─────────────────────────────────────────
+  const exportCSV = () => {
+    if (!testCases.length) return;
+    const headers = ["ID", "Category", "Title", "Steps", "Expected Result", "Priority", "Status", "Notes"];
+    const rows = testCases.map(tc => [tc.id, tc.category, tc.title, tc.steps, tc.expectedResult, tc.priority, tc.status, tc.notes]
+      .map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `test-cases-${Date.now()}.csv`; a.click();
+  };
+
+  // ── Run agent ─────────────────────────────────────────────
+  const startRun = async () => {
     const active = targets.filter(t => t.enabled && t.url.trim());
     if (!active.length || !goal.trim() || running) return;
     setRunning(true);
@@ -142,7 +245,6 @@ export default function HumanAgentPage() {
     for (let i = 0; i < active.length; i++) {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
-
       try {
         const res = await fetch("/api/human-agent/run", {
           method: "POST",
@@ -189,6 +291,90 @@ export default function HumanAgentPage() {
 
   const activeRun = runs.find(r => r.target.id === activeTab);
   const enabledCount = targets.filter(t => t.enabled && t.url.trim()).length;
+  const busy = generating || running || exporting || importing;
+
+  // ── Shared left panel settings ────────────────────────────
+  const sharedSettings = (
+    <div className="flex-1 overflow-y-auto p-4 space-y-5">
+      {/* Target URLs */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-medium text-gray-600">대상 URL</span>
+          <button onClick={addTarget} disabled={busy} className="text-xs text-blue-600 hover:text-blue-700 disabled:opacity-40">+ 추가</button>
+        </div>
+        <div className="space-y-2">
+          {targets.map(t => (
+            <TargetCard key={t.id} target={t} disabled={busy}
+              onChange={(f, v) => updateTarget(t.id, f, v)}
+              onRemove={targets.length > 1 ? () => removeTarget(t.id) : undefined}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Goal */}
+      <div>
+        <label className="text-xs font-medium text-gray-600 block mb-1">테스트 목표</label>
+        <textarea className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
+          rows={3} value={goal} onChange={e => setGoal(e.target.value)}
+          placeholder="예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘" disabled={busy} />
+        <p className="text-xs text-gray-400 mt-0.5">자연어로 자유롭게 작성하세요</p>
+      </div>
+
+      {/* Sheet Upload */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs font-medium text-gray-600">시나리오 시트 (선택)</span>
+          {sheet && <button onClick={() => setSheet(null)} className="text-xs text-gray-400 hover:text-red-500">✕ 제거</button>}
+        </div>
+        {sheet ? (
+          <div className="text-xs bg-green-50 border border-green-200 rounded px-3 py-2 text-green-700">
+            📄 {sheet.fileName} · {sheet.rowCount}행
+          </div>
+        ) : (
+          <label className={`flex flex-col items-center gap-1 border-2 border-dashed rounded-lg py-3 cursor-pointer transition-colors ${fileError ? "border-red-300 bg-red-50" : "border-gray-200 hover:border-blue-300 hover:bg-blue-50"}`}>
+            <input ref={fileRef} type="file" accept=".json,.csv,.tsv,.xlsx,.xls" className="hidden" onChange={handleFile} disabled={busy} />
+            <span className="text-xs text-gray-500">파일 업로드</span>
+            <span className="text-xs text-gray-400">.xlsx · .csv · .tsv · .json</span>
+          </label>
+        )}
+        {fileError && <p className="text-xs text-red-500 mt-1">{fileError}</p>}
+      </div>
+
+      {/* Categories */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-medium text-gray-600">테스트 카테고리</span>
+          <button onClick={() => setCategories(new Set(CATEGORIES.map(c => c.id)))} className="text-xs text-gray-400 hover:text-blue-500" disabled={busy}>전체</button>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {CATEGORIES.map(c => (
+            <button key={c.id} onClick={() => toggleCategory(c.id)} disabled={busy}
+              className={`text-xs px-2 py-1 rounded-full border transition-colors ${categories.has(c.id) ? "bg-blue-100 border-blue-300 text-blue-700" : "bg-white border-gray-200 text-gray-400"}`}>
+              {c.emoji} {c.id}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Custom Instructions */}
+      <div>
+        <label className="text-xs font-medium text-gray-600 block mb-1">사용자 지시사항 (선택)</label>
+        <textarea className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
+          rows={2} value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
+          placeholder="예: 반드시 모바일 뷰포트 기준으로 테스트해줘" disabled={busy} />
+      </div>
+
+      {/* Google Sheet ID (both modes) */}
+      <div>
+        <label className="text-xs font-medium text-gray-600 block mb-1">Google 시트 ID (선택)</label>
+        <input className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
+          value={sheetId} onChange={e => setSheetId(e.target.value)}
+          placeholder="스프레드시트 URL의 /d/.../ 부분" disabled={busy} />
+        <p className="text-xs text-gray-400 mt-0.5">생성된 케이스를 시트에 저장하거나 시트에서 불러옵니다</p>
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex h-[calc(100vh-56px)]">
@@ -203,99 +389,78 @@ export default function HumanAgentPage() {
             <button onClick={() => setPanelOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg">‹</button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-5">
-            {/* Target URLs */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium text-gray-600">대상 URL</span>
-                <button onClick={addTarget} disabled={running} className="text-xs text-blue-600 hover:text-blue-700 disabled:opacity-40">+ 추가</button>
-              </div>
-              <div className="space-y-2">
-                {targets.map(t => (
-                  <TargetCard key={t.id} target={t} disabled={running}
-                    onChange={(f, v) => updateTarget(t.id, f, v)}
-                    onRemove={targets.length > 1 ? () => removeTarget(t.id) : undefined}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Goal */}
-            <div>
-              <label className="text-xs font-medium text-gray-600 block mb-1">테스트 목표</label>
-              <textarea
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
-                rows={3} value={goal} onChange={e => setGoal(e.target.value)}
-                placeholder="예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘" disabled={running}
-              />
-              <p className="text-xs text-gray-400 mt-0.5">자연어로 자유롭게 작성하세요</p>
-            </div>
-
-            {/* Sheet Upload */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-gray-600">시나리오 시트 (선택)</span>
-                {sheet && <button onClick={() => setSheet(null)} className="text-xs text-gray-400 hover:text-red-500">✕ 제거</button>}
-              </div>
-              {sheet ? (
-                <div className="text-xs bg-green-50 border border-green-200 rounded px-3 py-2 text-green-700">
-                  📄 {sheet.fileName} · {sheet.rowCount}행 → AI 해석
-                </div>
-              ) : (
-                <label className={`flex flex-col items-center gap-1 border-2 border-dashed rounded-lg py-3 cursor-pointer transition-colors ${fileError ? "border-red-300 bg-red-50" : "border-gray-200 hover:border-blue-300 hover:bg-blue-50"}`}>
-                  <input ref={fileRef} type="file" accept=".json,.csv,.tsv,.xlsx,.xls" className="hidden" onChange={handleFile} disabled={running} />
-                  <span className="text-xs text-gray-500">파일 업로드</span>
-                  <span className="text-xs text-gray-400">.xlsx · .csv · .tsv · .json</span>
-                </label>
-              )}
-              {fileError && <p className="text-xs text-red-500 mt-1">{fileError}</p>}
-              {sheet && <p className="text-xs text-gray-400 mt-1">시트 내용이 테스트 컨텍스트로 AI에 전달됩니다</p>}
-            </div>
-
-            {/* Max Steps */}
-            <div>
-              <label className="text-xs font-medium text-gray-600 block mb-1">최대 스텝 수: <span className="text-blue-600">{maxSteps}</span></label>
-              <input type="range" min={5} max={30} step={5} value={maxSteps}
-                onChange={e => setMaxSteps(Number(e.target.value))}
-                className="w-full accent-blue-500" disabled={running} />
-              <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>30</span></div>
-            </div>
-
-            {/* Categories */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium text-gray-600">테스트 카테고리</span>
-                <button onClick={() => setCategories(new Set(CATEGORIES.map(c => c.id)))} className="text-xs text-gray-400 hover:text-blue-500" disabled={running}>전체</button>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {CATEGORIES.map(c => (
-                  <button key={c.id} onClick={() => toggleCategory(c.id)} disabled={running}
-                    className={`text-xs px-2 py-1 rounded-full border transition-colors ${categories.has(c.id) ? "bg-blue-100 border-blue-300 text-blue-700" : "bg-white border-gray-200 text-gray-400"}`}>
-                    {c.emoji} {c.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Custom Instructions */}
-            <div>
-              <label className="text-xs font-medium text-gray-600 block mb-1">사용자 지시사항 (선택)</label>
-              <textarea
-                className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
-                rows={2} value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
-                placeholder="예: 반드시 모바일 뷰포트 기준으로 테스트해줘" disabled={running}
-              />
+          {/* Mode toggle */}
+          <div className="px-4 pt-3 pb-0">
+            <div className="flex rounded-lg overflow-hidden border border-gray-200 text-xs font-medium">
+              <button onClick={() => setMode("generate")} disabled={busy}
+                className={`flex-1 py-2 transition-colors ${mode === "generate" ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-50"}`}>
+                📋 케이스 생성
+              </button>
+              <button onClick={() => setMode("run")} disabled={busy}
+                className={`flex-1 py-2 transition-colors ${mode === "run" ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-50"}`}>
+                ▶ 직접 실행
+              </button>
             </div>
           </div>
 
+          {sharedSettings}
+
+          {/* Mode-specific footer controls */}
           <div className="p-4 border-t space-y-2">
-            {enabledCount > 1 && (
-              <p className="text-xs text-blue-600 text-center">{enabledCount}개 URL 순차 실행</p>
+            {mode === "generate" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 block mb-1">
+                    생성할 케이스 수: <span className="text-blue-600">{caseCount}</span>
+                  </label>
+                  <input type="range" min={5} max={30} step={5} value={caseCount}
+                    onChange={e => setCaseCount(Number(e.target.value))}
+                    className="w-full accent-blue-500" disabled={busy} />
+                  <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>30</span></div>
+                </div>
+                <button onClick={generate} disabled={busy || enabledCount === 0 || !goal.trim()}
+                  className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
+                  {generating ? "생성 중..." : "📋 테스트 케이스 생성"}
+                </button>
+                {sheetId && testCases.length > 0 && (
+                  <div className="space-y-1">
+                    <button onClick={exportToSheets} disabled={busy}
+                      className="w-full py-2 rounded-lg text-xs font-medium border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-40">
+                      {exporting ? "내보내는 중..." : "📤 Google 시트에 내보내기"}
+                    </button>
+                    <button onClick={importFromSheets} disabled={busy}
+                      className="w-full py-2 rounded-lg text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">
+                      {importing ? "불러오는 중..." : "📥 Google 시트에서 불러오기"}
+                    </button>
+                  </div>
+                )}
+                {sheetId && testCases.length === 0 && (
+                  <button onClick={importFromSheets} disabled={busy}
+                    className="w-full py-2 rounded-lg text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40">
+                    {importing ? "불러오는 중..." : "📥 Google 시트에서 불러오기"}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 block mb-1">
+                    최대 스텝 수: <span className="text-blue-600">{maxSteps}</span>
+                  </label>
+                  <input type="range" min={5} max={30} step={5} value={maxSteps}
+                    onChange={e => setMaxSteps(Number(e.target.value))}
+                    className="w-full accent-blue-500" disabled={busy} />
+                  <div className="flex justify-between text-xs text-gray-400"><span>5</span><span>30</span></div>
+                </div>
+                {enabledCount > 1 && (
+                  <p className="text-xs text-blue-600 text-center">{enabledCount}개 URL 순차 실행</p>
+                )}
+                <button onClick={startRun} disabled={busy || enabledCount === 0 || !goal.trim()}
+                  className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
+                  {running ? "실행 중..." : "▶ 테스트 시작"}
+                </button>
+              </>
             )}
-            <button onClick={start} disabled={running || enabledCount === 0 || !goal.trim()}
-              className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
-              {running ? "실행 중..." : "▶ 테스트 시작"}
-            </button>
           </div>
         </div>
       )}
@@ -307,91 +472,223 @@ export default function HumanAgentPage() {
           {!panelOpen && (
             <button onClick={() => setPanelOpen(true)} className="text-gray-400 hover:text-gray-600 text-lg">›</button>
           )}
-          <span className="text-sm font-medium text-gray-700">실행 로그</span>
+          <span className="text-sm font-medium text-gray-700">
+            {mode === "generate" ? "생성된 테스트 케이스" : "실행 로그"}
+          </span>
+          {generating && (
+            <span className="flex items-center gap-1.5 text-xs text-blue-600">
+              <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+              GPT-4o가 테스트 케이스 생성 중...
+            </span>
+          )}
           {running && (
             <span className="flex items-center gap-1.5 text-xs text-blue-600">
               <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
               Qwen3-VL 인식 → GPT-4o 판단 중...
             </span>
           )}
-          {runs.length > 0 && !running && (
+          {mode === "generate" && testCases.length > 0 && (
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-xs text-gray-400">{testCases.length}개</span>
+              <button onClick={exportCSV}
+                className="text-xs px-3 py-1 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors">
+                CSV 다운로드
+              </button>
+            </div>
+          )}
+          {mode === "run" && runs.length > 0 && !running && (
             <span className="text-xs text-gray-400 ml-auto">{activeRun?.steps.length ?? 0} 스텝</span>
           )}
         </div>
 
-        {/* Tabs */}
-        {runs.length > 1 && (
-          <div className="flex border-b overflow-x-auto bg-white">
-            {runs.map(r => {
-              const statusDot = r.status === "done" ? "bg-green-400" : r.status === "fail" ? "bg-red-400" : r.status === "running" ? "bg-blue-400 animate-pulse" : r.status === "error" ? "bg-red-400" : "bg-gray-300";
-              return (
-                <button key={r.target.id} onClick={() => setActiveTab(r.target.id)}
-                  className={`px-4 py-2 text-xs whitespace-nowrap border-b-2 flex items-center gap-1.5 transition-colors ${activeTab === r.target.id ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                  <span className={`w-2 h-2 rounded-full ${statusDot}`} />
-                  {r.target.label}
-                </button>
-              );
-            })}
+        {/* ── Generate mode ────────────────────────────────── */}
+        {mode === "generate" && (
+          <div className="flex-1 overflow-y-auto">
+            {/* Status messages */}
+            {(exportStatus || importStatus) && (
+              <div className={`mx-6 mt-4 px-4 py-2 rounded-lg text-sm ${(exportStatus ?? importStatus ?? "").startsWith("✅") ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                {exportStatus ?? importStatus}
+              </div>
+            )}
+
+            {genError && (
+              <div className="mx-6 mt-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                {genError}
+              </div>
+            )}
+
+            {testCases.length === 0 && !generating && !genError && (
+              <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+                <div className="text-5xl">📋</div>
+                <p className="text-sm">목표와 URL을 설정하고 테스트 케이스를 생성하세요</p>
+                <p className="text-xs text-gray-300">실행 없이 케이스만 작성합니다 · Google 시트로 내보낼 수 있습니다</p>
+              </div>
+            )}
+
+            {generating && (
+              <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+                <span className="w-10 h-10 border-4 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm">GPT-4o가 테스트 케이스를 작성하고 있습니다...</p>
+              </div>
+            )}
+
+            {testCases.length > 0 && <TestCaseTable testCases={testCases} onUpdate={setTestCases} />}
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
-          {/* Empty */}
-          {runs.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
-              <div className="text-5xl">🤖</div>
-              <p className="text-sm">목표를 입력하고 테스트를 시작하세요</p>
-              <p className="text-xs text-gray-300">Qwen3-VL이 화면을 인식하고 GPT-4o가 판단합니다</p>
-            </div>
-          )}
-
-          {/* Steps */}
-          {activeRun && (
-            <div className="divide-y">
-              {activeRun.steps.map(step => (
-                <StepCard key={step.stepNumber} step={step}
-                  expanded={expandedStep === step.stepNumber}
-                  onToggle={() => setExpandedStep(expandedStep === step.stepNumber ? null : step.stepNumber)}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Running spinner */}
-          {running && activeRun?.status === "running" && (
-            <div className="p-4 flex items-center gap-3 text-sm text-gray-500">
-              <span className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-              화면 분석 중...
-            </div>
-          )}
-
-          {/* Result */}
-          {activeRun?.result && (
-            <div className={`m-6 p-4 rounded-lg border text-sm ${
-              activeRun.result.status === "done" ? "bg-green-50 border-green-200 text-green-800" :
-              activeRun.result.status === "fail" ? "bg-red-50 border-red-200 text-red-800" :
-              "bg-yellow-50 border-yellow-200 text-yellow-800"
-            }`}>
-              <div className="font-semibold mb-1">
-                {activeRun.result.status === "done" ? "✅ 완료" : activeRun.result.status === "fail" ? "❌ 버그 발견" : "⏱ 최대 스텝 도달"}
+        {/* ── Run mode ─────────────────────────────────────── */}
+        {mode === "run" && (
+          <>
+            {/* Tabs */}
+            {runs.length > 1 && (
+              <div className="flex border-b overflow-x-auto bg-white">
+                {runs.map(r => {
+                  const statusDot = r.status === "done" ? "bg-green-400" : r.status === "fail" ? "bg-red-400" : r.status === "running" ? "bg-blue-400 animate-pulse" : r.status === "error" ? "bg-red-400" : "bg-gray-300";
+                  return (
+                    <button key={r.target.id} onClick={() => setActiveTab(r.target.id)}
+                      className={`px-4 py-2 text-xs whitespace-nowrap border-b-2 flex items-center gap-1.5 transition-colors ${activeTab === r.target.id ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+                      <span className={`w-2 h-2 rounded-full ${statusDot}`} />
+                      {r.target.label}
+                    </button>
+                  );
+                })}
               </div>
-              <p>{activeRun.result.summary}</p>
-              <p className="text-xs mt-2 opacity-70">
-                {activeRun.result.steps.length} 스텝 · {(activeRun.result.totalDurationMs / 1000).toFixed(1)}초
-              </p>
-            </div>
-          )}
+            )}
 
-          {activeRun?.status === "error" && (
-            <div className="m-6 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-              <strong>오류:</strong> {activeRun.error}
-            </div>
-          )}
+            <div className="flex-1 overflow-y-auto">
+              {runs.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+                  <div className="text-5xl">🤖</div>
+                  <p className="text-sm">목표를 입력하고 테스트를 시작하세요</p>
+                  <p className="text-xs text-gray-300">Qwen3-VL + CDP A11y + GPT-4o + Validator</p>
+                </div>
+              )}
 
-          <div ref={bottomRef} />
-        </div>
+              {activeRun && (
+                <div className="divide-y">
+                  {activeRun.steps.map(step => (
+                    <StepCard key={step.stepNumber} step={step}
+                      expanded={expandedStep === step.stepNumber}
+                      onToggle={() => setExpandedStep(expandedStep === step.stepNumber ? null : step.stepNumber)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {running && activeRun?.status === "running" && (
+                <div className="p-4 flex items-center gap-3 text-sm text-gray-500">
+                  <span className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                  화면 분석 중...
+                </div>
+              )}
+
+              {activeRun?.result && (
+                <div className={`m-6 p-4 rounded-lg border text-sm ${
+                  activeRun.result.status === "done" ? "bg-green-50 border-green-200 text-green-800" :
+                  activeRun.result.status === "fail" ? "bg-red-50 border-red-200 text-red-800" :
+                  "bg-yellow-50 border-yellow-200 text-yellow-800"
+                }`}>
+                  <div className="font-semibold mb-1">
+                    {activeRun.result.status === "done" ? "✅ 완료" : activeRun.result.status === "fail" ? "❌ 버그 발견" : "⏱ 최대 스텝 도달"}
+                  </div>
+                  <p>{activeRun.result.summary}</p>
+                  <p className="text-xs mt-2 opacity-70">
+                    {activeRun.result.steps.length} 스텝 · {(activeRun.result.totalDurationMs / 1000).toFixed(1)}초
+                  </p>
+                </div>
+              )}
+
+              {activeRun?.status === "error" && (
+                <div className="m-6 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                  <strong>오류:</strong> {activeRun.error}
+                </div>
+              )}
+
+              <div ref={bottomRef} />
+            </div>
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+// ─── Test Case Table ───────────────────────────────────────────
+function TestCaseTable({ testCases, onUpdate }: {
+  testCases: TestCase[];
+  onUpdate: (cases: TestCase[]) => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const updateStatus = (id: string, status: TestCase["status"]) => {
+    onUpdate(testCases.map(tc => tc.id === id ? { ...tc, status } : tc));
+  };
+
+  return (
+    <div className="divide-y">
+      {testCases.map((tc) => (
+        <div key={tc.id} className="hover:bg-gray-50 transition-colors">
+          <button onClick={() => setExpanded(expanded === tc.id ? null : tc.id)}
+            className="w-full px-6 py-3 flex items-start gap-3 text-left">
+            <span className="text-xs font-mono text-gray-400 shrink-0 mt-0.5 w-14">{tc.id}</span>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 shrink-0 mt-0.5">{tc.category}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-gray-800 font-medium leading-snug">{tc.title}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className={`text-xs px-2 py-0.5 rounded-full ${PRIORITY_COLORS[tc.priority] ?? ""}`}>{tc.priority}</span>
+              <StatusBadge status={tc.status} onChange={(s) => updateStatus(tc.id, s)} />
+              <svg className={`w-4 h-4 text-gray-400 transition-transform ${expanded === tc.id ? "rotate-180" : ""}`}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
+          </button>
+
+          {expanded === tc.id && (
+            <div className="px-6 pb-4 space-y-3 bg-gray-50 border-t">
+              <div className="pt-3 grid grid-cols-1 gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 mb-1">테스트 스텝</p>
+                  <pre className="text-xs text-gray-700 bg-white rounded-lg px-3 py-2 border whitespace-pre-wrap font-sans leading-relaxed">{tc.steps}</pre>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 mb-1">기대 결과</p>
+                  <p className="text-xs text-gray-700 bg-white rounded-lg px-3 py-2 border leading-relaxed">{tc.expectedResult}</p>
+                </div>
+                {tc.notes && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 mb-1">노트</p>
+                    <p className="text-xs text-gray-500 bg-white rounded-lg px-3 py-2 border">{tc.notes}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Status Badge (clickable cycle) ───────────────────────────
+const STATUS_CYCLE: TestCase["status"][] = ["Not Run", "Pass", "Fail", "Skip"];
+const STATUS_COLORS: Record<string, string> = {
+  "Not Run": "bg-gray-100 text-gray-500",
+  "Pass": "bg-green-100 text-green-700",
+  "Fail": "bg-red-100 text-red-700",
+  "Skip": "bg-yellow-100 text-yellow-700",
+};
+function StatusBadge({ status, onChange }: { status: TestCase["status"]; onChange: (s: TestCase["status"]) => void }) {
+  const next = () => {
+    const idx = STATUS_CYCLE.indexOf(status);
+    onChange(STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length]);
+  };
+  return (
+    <button onClick={(e) => { e.stopPropagation(); next(); }}
+      className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${STATUS_COLORS[status]}`}>
+      {status}
+    </button>
   );
 }
 
