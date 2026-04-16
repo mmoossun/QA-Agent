@@ -11,7 +11,7 @@ export const FAST_MODEL = "claude-haiku-4-5-20251001";
 
 /** Returns the active provider: "claude" | "openai" */
 export function getProvider(): "claude" | "openai" {
-  const p = (process.env.AI_PROVIDER ?? "claude").toLowerCase();
+  const p = (process.env.AI_PROVIDER ?? "openai").toLowerCase();
   return p === "openai" ? "openai" : "claude";
 }
 
