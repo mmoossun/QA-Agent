@@ -1,11 +1,12 @@
 /**
- * Google Sheets API client — Service Account authentication
+ * Google Sheets API client — OAuth2 Refresh Token authentication
  *
  * Required env vars:
- *   GOOGLE_SERVICE_ACCOUNT_EMAIL  — service account email
- *   GOOGLE_PRIVATE_KEY            — private key (replace \n literals with real newlines)
+ *   GOOGLE_CLIENT_ID      — OAuth2 client ID (from Google Cloud Console)
+ *   GOOGLE_CLIENT_SECRET  — OAuth2 client secret
+ *   GOOGLE_REFRESH_TOKEN  — long-lived refresh token (run scripts/get-google-token.ts once)
  *
- * Sheet permissions: Share the target sheet with the service account email (Editor).
+ * Setup: see scripts/get-google-token.ts for one-time token generation
  */
 
 import { google, sheets_v4 } from "googleapis";
@@ -26,18 +27,20 @@ const COLUMNS = ["ID", "Category", "Title", "Steps", "Expected Result", "Priorit
 
 // ── Auth ──────────────────────────────────────────────────────
 function getAuth() {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const clientId     = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
 
-  if (!email || !key) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY is not set.");
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      "Google Sheets 환경변수 미설정: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN\n" +
+      "scripts/get-google-token.ts 를 실행해서 토큰을 발급받으세요."
+    );
   }
 
-  return new google.auth.JWT({
-    email,
-    key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
+  const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2.setCredentials({ refresh_token: refreshToken });
+  return oauth2;
 }
 
 function getSheetsClient(): sheets_v4.Sheets {
