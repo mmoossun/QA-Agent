@@ -114,17 +114,15 @@ async function parseScenarioFile(file: File): Promise<ParsedSheet & { error?: st
       if (rows.every(isFullQAScenario)) {
         return { direct: rows as QAScenario[], hints: [], fileName: file.name, rowCount: rows.length };
       }
-      // Simple format → hints
-      const hints = rows
-        .map((r: Record<string, unknown>) => {
-          const parts = [r.name ?? r.title ?? ""].filter(Boolean);
-          if (r.description) parts.push(`(${r.description})`);
-          if (r.category)    parts.push(`[카테고리:${r.category}]`);
-          if (r.priority)    parts.push(`[우선순위:${r.priority}]`);
-          return parts.join(" ").trim();
-        })
-        .filter(Boolean) as string[];
-      return { direct: [], hints, fileName: file.name, rowCount: rows.length };
+      // Simple JSON array → convert to markdown table for AI free-form interpretation
+      const headers = Array.from(new Set(rows.flatMap((r: Record<string, unknown>) => Object.keys(r))));
+      const header  = `| ${headers.join(" | ")} |`;
+      const divider = `| ${headers.map(() => "---").join(" | ")} |`;
+      const dataRows = rows.slice(0, 100).map(
+        (r: Record<string, unknown>) => `| ${headers.map((h) => String(r[h] ?? "").replace(/\|/g, "｜")).join(" | ")} |`
+      );
+      const rawTable = [header, divider, ...dataRows].join("\n");
+      return { direct: [], hints: [], rawTable, fileName: file.name, rowCount: rows.length };
     } catch (e) {
       return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: `JSON 파싱 오류: ${e}` };
     }
@@ -135,28 +133,16 @@ async function parseScenarioFile(file: File): Promise<ParsedSheet & { error?: st
     const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
     if (lines.length < 2) return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "CSV 파일이 비어있습니다" };
 
-    const headers = parseCSVLine(lines[0], sep).map((h) => h.toLowerCase().replace(/"/g, ""));
-    const col = (name: string, alt?: string) => {
-      const idx = headers.indexOf(name);
-      return idx !== -1 ? idx : (alt ? headers.indexOf(alt) : -1);
-    };
-    const nameIdx = col("name", "테스트명");
-    if (nameIdx === -1) return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: '"name" 또는 "테스트명" 컬럼이 필요합니다' };
-
-    const descIdx = col("description", "설명");
-    const catIdx  = col("category", "카테고리");
-    const priIdx  = col("priority", "우선순위");
-
-    const hints = lines.slice(1).map((line) => {
-      const cols = parseCSVLine(line, sep).map((c) => c.replace(/"/g, "").trim());
-      const parts = [cols[nameIdx]];
-      if (descIdx !== -1 && cols[descIdx]) parts.push(`(${cols[descIdx]})`);
-      if (catIdx  !== -1 && cols[catIdx])  parts.push(`[카테고리:${cols[catIdx]}]`);
-      if (priIdx  !== -1 && cols[priIdx])  parts.push(`[우선순위:${cols[priIdx]}]`);
-      return parts.join(" ").trim();
-    }).filter(Boolean);
-
-    return { direct: [], hints, fileName: file.name, rowCount: hints.length };
+    // Convert to markdown table for AI free-form interpretation
+    const headers = parseCSVLine(lines[0], sep).map((h) => h.replace(/"/g, "").trim());
+    const header  = `| ${headers.join(" | ")} |`;
+    const divider = `| ${headers.map(() => "---").join(" | ")} |`;
+    const dataRows = lines.slice(1, 101).map((line) => {
+      const cols = parseCSVLine(line, sep).map((c) => c.replace(/"/g, "").replace(/\|/g, "｜").trim());
+      return `| ${headers.map((_, i) => cols[i] ?? "").join(" | ")} |`;
+    });
+    const rawTable = [header, divider, ...dataRows].join("\n");
+    return { direct: [], hints: [], rawTable, fileName: file.name, rowCount: lines.length - 1 };
   }
 
   return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "지원 형식: .json .csv .tsv .xlsx .xls" };
@@ -405,9 +391,7 @@ export default function AgentPage() {
                     <p className="text-xs text-green-600 mt-0.5">
                       {sheet.direct.length > 0
                         ? `${sheet.direct.length}개 시나리오 (완전 형식) 로드됨`
-                        : sheet.rawTable
-                        ? `${sheet.rowCount}행 테이블 → AI가 자유 해석 후 시나리오 생성`
-                        : `${sheet.hints.length}개 테스트 케이스 → AI가 Playwright 단계로 변환`}
+                        : `${sheet.rowCount}행 → AI가 자유 해석 후 시나리오 생성`}
                     </p>
                   </div>
                   <button onClick={clearFile} className="text-xs text-gray-400 hover:text-red-500 shrink-0">✕</button>
