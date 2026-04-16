@@ -17,6 +17,8 @@ export interface QAStep {
   value?: string;
   description: string;
   timeout?: number;
+  /** CSS selector for an iframe to operate within (e.g. "iframe.widget-frame", "iframe[src*='chat']") */
+  frame?: string;
 }
 
 export interface SelectorStrategy {

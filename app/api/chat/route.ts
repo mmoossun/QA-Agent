@@ -24,6 +24,49 @@ const RequestSchema = z.object({
   loginPassword: z.string().optional(),
 });
 
+// ─── Collect DOM info from any execution context ─────────────
+const DOM_COLLECTOR = `() => {
+  const lines = [];
+  const attr = (el, a) => el.getAttribute(a) || "";
+  const cls = (el) => (el.className?.toString() || "").replace(/\\s+/g, " ").slice(0, 80);
+
+  lines.push("URL: " + window.location.href);
+  lines.push("Title: " + document.title);
+
+  // Buttons & clickable elements
+  const btns = Array.from(document.querySelectorAll('button,[role="button"],[role="link"],a[href]')).slice(0, 40);
+  if (btns.length) {
+    lines.push("\\n[Buttons/Links]");
+    btns.forEach(el => {
+      const text = (el.textContent || "").trim().slice(0, 60);
+      const aria = attr(el, "aria-label");
+      const tid = attr(el, "data-testid");
+      const href = el.tagName === "A" ? attr(el, "href") : "";
+      if (text || aria) lines.push('  ' + el.tagName.toLowerCase() + ': text="' + text + '" aria="' + aria + '" class="' + cls(el) + '" testid="' + tid + '"' + (href ? ' href="' + href + '"' : ""));
+    });
+  }
+
+  // Inputs / textareas / selects
+  const inputs = Array.from(document.querySelectorAll("input,textarea,select")).slice(0, 30);
+  if (inputs.length) {
+    lines.push("\\n[Inputs]");
+    inputs.forEach(el => {
+      lines.push('  ' + el.tagName.toLowerCase() + ': type="' + (el.type || "") + '" placeholder="' + (el.placeholder || "") + '" id="' + (el.id || "") + '" name="' + (el.name || "") + '" aria="' + attr(el, "aria-label") + '" testid="' + attr(el, "data-testid") + '"');
+    });
+  }
+
+  // Interactive roles
+  const roles = Array.from(document.querySelectorAll("[role]")).filter(el =>
+    ["dialog","alert","tab","checkbox","radio","switch","menuitem","option"].includes(attr(el,"role"))
+  ).slice(0, 20);
+  if (roles.length) {
+    lines.push("\\n[Interactive Roles]");
+    roles.forEach(el => lines.push('  role="' + attr(el,"role") + '" text="' + (el.textContent||"").trim().slice(0,50) + '" class="' + cls(el) + '"'));
+  }
+
+  return lines.join("\\n");
+}`;
+
 // ─── Quick page snapshot via Playwright ──────────────────────
 async function quickSnapshot(url: string, loginEmail?: string, loginPassword?: string): Promise<string> {
   const { chromium } = await import("playwright");
@@ -32,7 +75,7 @@ async function quickSnapshot(url: string, loginEmail?: string, loginPassword?: s
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000); // extra wait for widgets/SPAs
 
     // Login if credentials provided and login form exists
     if (loginEmail && loginPassword && await page.locator('input[type="password"]').count() > 0) {
@@ -44,60 +87,55 @@ async function quickSnapshot(url: string, loginEmail?: string, loginPassword?: s
         if (await page.locator(sel).count() > 0) { await page.click(sel); break; }
       }
       await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(2000);
     }
 
-    const snapshot = await page.evaluate(() => {
-      const lines: string[] = [];
-      lines.push(`URL: ${window.location.href}`);
-      lines.push(`Title: ${document.title}`);
+    // ── Main page snapshot ──────────────────────────────────
+    const mainSnapshot = await page.evaluate(new Function(`return (${DOM_COLLECTOR})()`) as () => string);
+    const lines: string[] = [mainSnapshot];
 
-      // Buttons
-      const btns = Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, 30);
-      if (btns.length) {
-        lines.push("\n[Buttons]");
-        btns.forEach((el) => {
-          const text = el.textContent?.trim().slice(0, 50) || "";
-          const aria = el.getAttribute("aria-label") || "";
-          const cls = (el.className?.toString() || "").slice(0, 60);
-          const tid = el.getAttribute("data-testid") || "";
-          if (text || aria) lines.push(`  button: text="${text}" aria="${aria}" class="${cls}" testid="${tid}"`);
-        });
-      }
+    // ── Iframe snapshots ───────────────────────────────────
+    const iframes = page.frames().slice(1); // skip main frame
+    for (const frame of iframes) {
+      try {
+        const src = frame.url();
+        if (!src || src === "about:blank") continue;
+        const frameSnap = await frame.evaluate(new Function(`return (${DOM_COLLECTOR})()`) as () => string);
+        if (frameSnap.includes("[Buttons") || frameSnap.includes("[Inputs]")) {
+          lines.push(`\n[IFRAME src="${src.slice(0, 100)}"]`);
+          lines.push(frameSnap);
+          lines.push(`[/IFRAME]`);
+        }
+      } catch { /* cross-origin or unavailable */ }
+    }
 
-      // Inputs
-      const inputs = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 20);
-      if (inputs.length) {
-        lines.push("\n[Inputs]");
-        inputs.forEach((el) => {
-          const e = el as HTMLInputElement;
-          lines.push(`  ${el.tagName.toLowerCase()}: type="${e.type}" placeholder="${e.placeholder}" id="${e.id}" name="${e.name}"`);
-        });
-      }
-
-      // Iframes
-      const iframes = Array.from(document.querySelectorAll("iframe")).slice(0, 5);
-      if (iframes.length) {
-        lines.push("\n[Iframes]");
-        iframes.forEach((f) => lines.push(`  iframe: src="${f.src}" id="${f.id}"`));
-      }
-
-      // Links (top 15)
-      const links = Array.from(document.querySelectorAll("a[href]")).slice(0, 15);
-      if (links.length) {
-        lines.push("\n[Links]");
-        links.forEach((el) => {
-          const text = el.textContent?.trim().slice(0, 40) || "";
-          const href = el.getAttribute("href") || "";
-          if (text) lines.push(`  link: text="${text}" href="${href}"`);
-        });
-      }
-
-      return lines.join("\n");
+    // ── Detect iframes for Playwright frame selector ───────
+    const iframeEls = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("iframe")).slice(0, 5).map(f => ({
+        src: f.src,
+        id: f.id,
+        cls: f.className,
+        name: f.name,
+      }));
     });
+    if (iframeEls.length) {
+      lines.push("\n[IFRAME SELECTORS — use step.frame to target these]");
+      iframeEls.forEach(f => {
+        const sel = f.id ? `iframe#${f.id}` : f.name ? `iframe[name="${f.name}"]` : f.src ? `iframe[src*="${f.src.split("/").pop()?.split("?")[0]}"]` : "iframe";
+        lines.push(`  frame selector: "${sel}" (src="${f.src.slice(0, 80)}")`);
+      });
+    }
 
-    logger.info({ url }, "Page snapshot collected for Chat QA");
-    return snapshot;
+    // ── Shadow DOM detection ───────────────────────────────
+    const hasShadow = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("*")).some(el => el.shadowRoot !== null)
+    );
+    if (hasShadow) {
+      lines.push("\n[Shadow DOM detected — use css selectors, Playwright auto-pierces shadow DOM]");
+    }
+
+    logger.info({ url, iframes: iframes.length, hasShadow }, "Page snapshot collected for Chat QA");
+    return lines.join("\n");
   } catch (err) {
     logger.warn({ url, err: String(err) }, "Snapshot failed, proceeding without");
     return `URL: ${url} (snapshot failed — using generic selectors)`;

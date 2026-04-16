@@ -310,6 +310,7 @@ export class QARunner {
   private async _executeStep(page: Page, step: QAStep, _runId: string): Promise<StepResult> {
     const start = Date.now();
     let screenshot: string | undefined;
+    const frame = step.frame; // iframe CSS selector, if any
 
     try {
       switch (step.action) {
@@ -318,30 +319,27 @@ export class QARunner {
             ? step.value
             : `${this.config.baseUrl}${step.value ?? ""}`;
           await page.goto(url, { waitUntil: "domcontentloaded", timeout: step.timeout ?? 30_000 });
-          // Short idle wait for SPA re-render
           await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
           break;
         }
 
         case "click": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000);
-          await loc.scrollIntoViewIfNeeded();
+          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000, frame);
+          if (!frame) await loc.scrollIntoViewIfNeeded();
           await loc.click();
-          // SPA navigation: short idle wait
           await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => {});
           break;
         }
 
         case "fill": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000);
+          const loc = await resolveSelector(page, step.target!, step.timeout ?? 12_000, frame);
           await loc.fill(step.value ?? "");
           break;
         }
 
         case "assert": {
-          // Use step timeout or default 15s (ZeroTalk SPA can be slow to render)
           const assertTimeout = step.timeout ?? 15_000;
-          const loc = await resolveSelector(page, step.target!, assertTimeout);
+          const loc = await resolveSelector(page, step.target!, assertTimeout, frame);
           await loc.waitFor({ state: "visible", timeout: assertTimeout });
           if (step.value) {
             const text = await loc.textContent();
@@ -361,17 +359,28 @@ export class QARunner {
           break;
 
         case "scroll":
-          await page.evaluate((y) => window.scrollTo(0, y), Number(step.value ?? 500));
+          if (frame) {
+            // Scroll inside iframe via JS
+            const fl = page.frameLocator(frame);
+            await fl.locator("body").evaluate((el, y) => el.scrollTo(0, y), Number(step.value ?? 500));
+          } else {
+            await page.evaluate((y) => window.scrollTo(0, y), Number(step.value ?? 500));
+          }
           break;
 
         case "hover": {
-          const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000);
+          const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000, frame);
           await loc.hover();
           break;
         }
 
         case "press":
-          await page.keyboard.press(step.value ?? "Enter");
+          if (frame) {
+            const loc = await resolveSelector(page, step.target!, step.timeout ?? 10_000, frame);
+            await loc.press(step.value ?? "Enter");
+          } else {
+            await page.keyboard.press(step.value ?? "Enter");
+          }
           break;
 
         case "evaluate":
@@ -379,8 +388,6 @@ export class QARunner {
           break;
 
         case "waitForUrl":
-          // Use "commit" so SPA client-side navigation (history.pushState) is detected.
-          // Default "load" never fires again after initial page load in SPAs.
           await page.waitForURL(step.value ?? "**", {
             timeout: step.timeout ?? 25_000,
             waitUntil: "commit",
