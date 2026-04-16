@@ -76,8 +76,30 @@ export class AgentRunner {
       throw new Error(`Site exploration failed: ${err}`);
     }
 
+    // ── Sheet info log ───────────────────────────────────────
+    if (this.config.sheetRawTable) {
+      const rowCount = this.config.sheetRawTable.split("\n").length - 2; // subtract header + divider
+      this.emit({
+        stage: "generating",
+        message: `📄 시트 ${rowCount}행 로드됨 → AI가 자유 해석 후 시나리오에 반영`,
+        progress: 28,
+      });
+    } else if (this.config.scenarioHints?.length) {
+      this.emit({
+        stage: "generating",
+        message: `📄 시트 ${this.config.scenarioHints.length}개 힌트 로드됨 → AI가 Playwright 단계로 변환`,
+        progress: 28,
+      });
+    } else if (this.config.directScenarios?.length) {
+      this.emit({
+        stage: "generating",
+        message: `📄 파일 시나리오 ${this.config.directScenarios.length}개 직접 로드됨 (AI 변환 없음)`,
+        progress: 28,
+      });
+    }
+
     // ── Stage 2: Generate Scenarios ──────────────────────────
-    this.emit({ stage: "generating", message: "Generating test scenarios...", progress: 30 });
+    this.emit({ stage: "generating", message: "AI 시나리오 생성 중...", progress: 30 });
     const generator = new ScenarioGenerator();
     let scenarios: QAScenario[];
 

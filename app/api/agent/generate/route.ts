@@ -67,6 +67,14 @@ export async function POST(req: NextRequest) {
             data: { routeCount: structure.routes.length, formCount: structure.forms.length, technologies: structure.technologies },
           });
 
+          // ── Sheet info ────────────────────────────────────────
+          if (sheetRawTable) {
+            const rowCount = sheetRawTable.split("\n").length - 2;
+            send({ type: "progress", stage: "generating", message: `📄 시트 ${rowCount}행 로드됨 → AI가 자유 해석 후 시나리오에 반영`, progress: 48 });
+          } else if (scenarioHints?.length) {
+            send({ type: "progress", stage: "generating", message: `📄 시트 ${scenarioHints.length}개 힌트 로드됨 → AI가 Playwright 단계로 변환`, progress: 48 });
+          }
+
           // ── Stage 2: Generate ─────────────────────────────────
           send({ type: "progress", stage: "generating", message: "AI 시나리오 생성 중...", progress: 55 });
 
