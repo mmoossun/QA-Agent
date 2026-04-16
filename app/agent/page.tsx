@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import type { QAReport, QAScenario } from "@/lib/ai/types";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -80,6 +81,38 @@ function isFullQAScenario(obj: unknown): obj is QAScenario {
 }
 
 async function parseScenarioFile(file: File): Promise<ParsedSheet & { error?: string }> {
+  // ── XLSX ──────────────────────────────────────────────────────
+  if (file.name.endsWith(".xlsx") || file.name.endsWith(".xls")) {
+    const buf = await file.arrayBuffer();
+    const wb  = XLSX.read(buf, { type: "array" });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
+
+    if (rows.length === 0)
+      return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "엑셀 파일이 비어있습니다" };
+
+    const headers = Object.keys(rows[0]).map((h) => h.toLowerCase());
+    const nameKey = Object.keys(rows[0]).find((k) => ["name", "테스트명"].includes(k.toLowerCase()));
+    if (!nameKey)
+      return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: '"name" 또는 "테스트명" 컬럼이 필요합니다' };
+
+    const descKey = Object.keys(rows[0]).find((k) => ["description", "설명"].includes(k.toLowerCase()));
+    const catKey  = Object.keys(rows[0]).find((k) => ["category", "카테고리"].includes(k.toLowerCase()));
+    const priKey  = Object.keys(rows[0]).find((k) => ["priority", "우선순위"].includes(k.toLowerCase()));
+
+    void headers; // used implicitly via key lookups above
+
+    const hints = rows.map((r) => {
+      const parts = [r[nameKey]];
+      if (descKey && r[descKey]) parts.push(`(${r[descKey]})`);
+      if (catKey  && r[catKey])  parts.push(`[카테고리:${r[catKey]}]`);
+      if (priKey  && r[priKey])  parts.push(`[우선순위:${r[priKey]}]`);
+      return parts.join(" ").trim();
+    }).filter(Boolean);
+
+    return { direct: [], hints, fileName: file.name, rowCount: hints.length };
+  }
+
   const text = await file.text();
 
   if (file.name.endsWith(".json")) {
@@ -135,7 +168,7 @@ async function parseScenarioFile(file: File): Promise<ParsedSheet & { error?: st
     return { direct: [], hints, fileName: file.name, rowCount: hints.length };
   }
 
-  return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "지원 형식: .json .csv .tsv" };
+  return { direct: [], hints: [], fileName: file.name, rowCount: 0, error: "지원 형식: .json .csv .tsv .xlsx .xls" };
 }
 
 function downloadTemplate() {
@@ -401,10 +434,10 @@ export default function AgentPage() {
               </div>
             ) : (
               <label className={`flex flex-col items-center justify-center gap-2 border-2 border-dashed rounded-lg py-5 cursor-pointer transition-colors ${fileError ? "border-red-300 bg-red-50" : "border-gray-200 hover:border-blue-300 hover:bg-blue-50"}`}>
-                <input ref={fileRef} type="file" accept=".json,.csv,.tsv" className="hidden" onChange={handleFileChange} disabled={isRunning || isGenerating} />
+                <input ref={fileRef} type="file" accept=".json,.csv,.tsv,.xlsx,.xls" className="hidden" onChange={handleFileChange} disabled={isRunning || isGenerating} />
                 <span className="text-2xl">📂</span>
                 <span className="text-xs text-gray-500">클릭하거나 파일을 드래그하세요</span>
-                <span className="text-xs text-gray-400">.json · .csv · .tsv</span>
+                <span className="text-xs text-gray-400">.json · .csv · .tsv · .xlsx</span>
               </label>
             )}
             {fileError && <p className="text-xs text-red-500 mt-1.5">{fileError}</p>}
