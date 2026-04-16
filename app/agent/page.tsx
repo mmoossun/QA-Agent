@@ -866,7 +866,7 @@ function AgentResultCard({ result }: { result: TargetResult }) {
               )}
 
               <div className="text-right">
-                <a href={`/reports/${report.runId}.html`} target="_blank" rel="noreferrer"
+                <a href={`/api/reports/${report.runId}.html`} target="_blank" rel="noreferrer"
                   className="text-xs text-blue-500 hover:underline">HTML 리포트 전체 보기 →</a>
               </div>
             </>

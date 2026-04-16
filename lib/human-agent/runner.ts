@@ -192,7 +192,7 @@ export class HumanAgentRunner {
       fullPage: false,
       type: "png",
     });
-    return { base64: buffer.toString("base64"), publicPath: `/screenshots/${filename}` };
+    return { base64: buffer.toString("base64"), publicPath: `/api/screenshots/${filename}` };
   }
 
   private async _decideAction(screenshotBase64: string, stepNum: number): Promise<ActionDecision> {

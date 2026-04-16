@@ -409,7 +409,7 @@ export class QARunner {
     const filename = `${name}_${Date.now()}.png`;
     const filepath = path.join(SCREENSHOTS_DIR, filename);
     await page.screenshot({ path: filepath, fullPage: false });
-    return `/screenshots/${filename}`;
+    return `/api/screenshots/${filename}`;
   }
 
   private _buildFailResult(scenario: QAScenario, runId: string, error: string): TestResult {
