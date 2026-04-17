@@ -24,7 +24,7 @@
  *  ⑨ Login v2 — A11y-based login with DOM fallback
  */
 
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Page, type Frame } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import { v4 as uuidv4 } from "uuid";
@@ -95,6 +95,7 @@ interface A11yRef {
   checked?: boolean;
   expanded?: boolean;
   backendDOMNodeId?: number;  // stored for CDP fallback
+  frameIndex?: number;        // undefined/0 = main frame; 1+ = child iframe index
 }
 
 interface ValidationResult {
@@ -130,10 +131,12 @@ Each step you receive:
      @eN refs are the ONLY valid targets for click/fill/select/type/hover.
      Elements with placeholder/type hints are unnamed inputs — use those to identify them.
   2. The screenshot is attached for visual context.
+  Elements marked [iframe] are inside a child frame (e.g., embedded chat widget). You CAN interact with them normally using their @eN ref.
 
 Action rules:
 - "target" MUST be an @eN ref from A11Y_REFS (or a full URL for navigate).
 - If you can SEE an element in the screenshot but it's NOT in A11Y_REFS: use scroll or wait, then retry.
+- For chat widgets or embedded apps: look for [iframe] elements in A11Y_REFS — they are already captured and clickable.
 - To type into a FIELD: use "fill" (replaces entire content) or "type" (appends characters).
 - To pick from a dropdown/combobox: use "select" with value = the option text.
 - After FAILED/UNVERIFIED action: try a completely different element or approach.
@@ -165,6 +168,7 @@ export class HumanAgentRunner {
   private recentActionKeys: string[] = [];
   private consecutiveFailures = 0;
 
+  private frames: Frame[] = [];
   private refMap: Map<string, A11yRef> = new Map();
   private a11yCache: { url: string; refs: A11yRef[] } | null = null;
   private qwenCache: { url: string; perception: string } | null = null;  // Qwen result per URL
@@ -672,6 +676,38 @@ export class HumanAgentRunner {
       logger.warn({ e }, "A11y CDP snapshot failed");
     }
 
+    // Scan child frames (e.g., chat widget or embedded app in iframe)
+    this.frames = this.page!.frames();
+    for (let fi = 1; fi < Math.min(this.frames.length, 5); fi++) {
+      const childFrame = this.frames[fi];
+      try {
+        const frameClient = await this.page!.context().newCDPSession(childFrame);
+        const { nodes: frameNodes } = await frameClient.send("Accessibility.getFullAXTree") as { nodes: CDPAXNode[] };
+        await frameClient.detach();
+        for (const node of frameNodes) {
+          if (node.ignored) continue;
+          const role = node.role?.value?.toLowerCase() ?? "";
+          if (!INTERACTIVE_ROLES.has(role)) continue;
+          const disabled = node.properties?.find(p => p.name === "disabled")?.value?.value;
+          if (disabled === true) continue;
+          const name = (node.name?.value ?? "").trim();
+          const value = node.value?.value ? String(node.value.value) : undefined;
+          const checked = node.properties?.find(p => p.name === "checked")?.value?.value;
+          const expanded = node.properties?.find(p => p.name === "expanded")?.value?.value;
+          const ref: A11yRef = {
+            ref: `@e${counter++}`,
+            role, name, value,
+            checked: typeof checked === "boolean" ? checked : undefined,
+            expanded: typeof expanded === "boolean" ? expanded : undefined,
+            backendDOMNodeId: node.backendDOMNodeId,
+            frameIndex: fi,
+          };
+          refs.push(ref);
+          this.refMap.set(ref.ref, ref);
+        }
+      } catch { /* ignore child frame A11y errors */ }
+    }
+
     const capped = refs.slice(0, 80);
     this.a11yCache = { url: currentUrl, refs: capped };
     return capped;
@@ -717,7 +753,7 @@ export class HumanAgentRunner {
 
     const refsText = a11yRefs.length
       ? a11yRefs.map(r => {
-          let line = `${r.ref} [${r.role}] "${r.name}"`;
+          let line = `${r.ref} [${r.role}]${r.frameIndex ? " [iframe]" : ""} "${r.name}"`;
           if (r.placeholder && r.placeholder !== r.name) line += ` placeholder="${r.placeholder}"`;
           if (r.inputType && r.inputType !== "text") line += ` type="${r.inputType}"`;
           if (r.value) line += ` (current: "${r.value.slice(0, 30)}")`;
@@ -974,6 +1010,32 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       } catch { /* ignore CDP fallback errors */ }
     }
 
+    // Strategy 4: child frame fallback (for elements inside iframes)
+    {
+      const name = ref?.name || hint;
+      for (const childFrame of this.frames.slice(1)) {
+        if (name) {
+          for (const role of ["button", "link", "tab", "option", "menuitem"] as const) {
+            try {
+              const loc = childFrame.getByRole(role, { name, exact: false });
+              if (await loc.count() > 0) {
+                await loc.first().scrollIntoViewIfNeeded();
+                await loc.first().click({ timeout: 5_000 });
+                return true;
+              }
+            } catch { /* try next */ }
+          }
+          try {
+            const loc = childFrame.getByText(name, { exact: false });
+            if (await loc.count() > 0) {
+              await loc.first().click({ timeout: 5_000 });
+              return true;
+            }
+          } catch { /* try next frame */ }
+        }
+      }
+    }
+
     return false;
   }
 
@@ -1049,6 +1111,33 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       } catch { /* ignore */ }
     }
 
+    // Strategy 6: child frame fallback
+    {
+      const name = ref?.name || ref?.placeholder || "";
+      for (const childFrame of this.frames.slice(1)) {
+        if (name) {
+          for (const role of ["textbox", "searchbox", "combobox"] as const) {
+            try {
+              const loc = childFrame.getByRole(role, { name, exact: false });
+              if (await loc.count() > 0) {
+                await loc.first().click({ timeout: 3_000 });
+                await loc.first().fill(value, { timeout: 6_000 });
+                return true;
+              }
+            } catch { /* try next */ }
+          }
+          try {
+            const loc = childFrame.getByPlaceholder(name, { exact: false });
+            if (await loc.count() > 0) {
+              await loc.first().click({ timeout: 3_000 });
+              await loc.first().fill(value, { timeout: 6_000 });
+              return true;
+            }
+          } catch { /* try next frame */ }
+        }
+      }
+    }
+
     return false;
   }
 
@@ -1115,6 +1204,16 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
           const loc = attempt();
           if (await loc.count() > 0) { await loc.first().hover(); return true; }
         } catch { /* try next */ }
+      }
+    }
+
+    // Child frame fallback
+    if (hintText) {
+      for (const childFrame of this.frames.slice(1)) {
+        try {
+          const loc = childFrame.getByText(hintText, { exact: false });
+          if (await loc.count() > 0) { await loc.first().hover(); return true; }
+        } catch { /* try next frame */ }
       }
     }
     return false;
