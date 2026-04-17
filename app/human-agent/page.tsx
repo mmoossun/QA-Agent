@@ -122,6 +122,9 @@ export default function HumanAgentPage() {
   const [generating, setGenerating]     = useState(false);
   const [genError, setGenError]         = useState<string | null>(null);
   const [sheetId, setSheetId]           = useState("");
+  const [sheetTabs, setSheetTabs]       = useState<string[]>([]);
+  const [selectedTab, setSelectedTab]   = useState<string>("");
+  const [loadingTabs, setLoadingTabs]   = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [exporting, setExporting]       = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
@@ -185,20 +188,36 @@ export default function HumanAgentPage() {
     }
   };
 
+  // ── Load tab list when sheetId is entered ────────────────
+  const loadTabs = async (id: string) => {
+    if (!id.trim()) { setSheetTabs([]); setSelectedTab(""); return; }
+    setLoadingTabs(true);
+    try {
+      const res = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(id.trim())}&tabs=1`);
+      const data = await res.json();
+      const tabs: string[] = (data.tabs ?? []).map((t: { title: string }) => t.title);
+      setSheetTabs(tabs);
+      setSelectedTab(tabs[0] ?? "");
+    } catch { setSheetTabs([]); }
+    finally { setLoadingTabs(false); }
+  };
+
   // ── Export to Google Sheets ───────────────────────────────
   const exportToSheets = async () => {
     if (!sheetId.trim() || testCases.length === 0 || exporting) return;
     setExporting(true);
     setExportStatus(null);
     try {
+      const body: Record<string, unknown> = { sheetId: sheetId.trim(), testCases };
+      if (selectedTab) body.tab = selectedTab;
       const res = await fetch("/api/google-sheets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheetId: sheetId.trim(), testCases }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "내보내기 실패");
-      setExportStatus(`✅ ${data.appended}개 테스트 케이스가 시트에 추가됐습니다`);
+      setExportStatus(`✅ ${data.appended}개 케이스가 "${selectedTab || "첫 번째 탭"}"에 추가됐습니다`);
     } catch (e) {
       setExportStatus(`❌ ${String(e)}`);
     } finally {
@@ -212,11 +231,12 @@ export default function HumanAgentPage() {
     setImporting(true);
     setImportStatus(null);
     try {
-      const res = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}`);
+      const tabParam = selectedTab ? `&tab=${encodeURIComponent(selectedTab)}` : "";
+      const res = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}${tabParam}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "불러오기 실패");
       setTestCases(data.testCases ?? []);
-      setImportStatus(`✅ ${data.testCases?.length ?? 0}개 테스트 케이스를 불러왔습니다`);
+      setImportStatus(`✅ "${selectedTab || "첫 번째 탭"}"에서 ${data.testCases?.length ?? 0}개 케이스를 불러왔습니다`);
     } catch (e) {
       setImportStatus(`❌ ${String(e)}`);
     } finally {
@@ -458,8 +478,28 @@ export default function HumanAgentPage() {
       <div>
         <label className="text-xs font-medium text-gray-600 block mb-1">Google 시트 ID (선택)</label>
         <input className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
-          value={sheetId} onChange={e => setSheetId(e.target.value)}
-          placeholder="스프레드시트 URL의 /d/.../ 부분" disabled={busy} />
+          value={sheetId}
+          onChange={e => {
+            // Extract sheet ID from full URL if pasted
+            const val = e.target.value;
+            const match = val.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+            setSheetId(match ? match[1] : val);
+          }}
+          onBlur={e => loadTabs(e.target.value)}
+          placeholder="시트 ID 또는 URL 전체 붙여넣기" disabled={busy} />
+        {loadingTabs && <p className="text-xs text-blue-500 mt-0.5">탭 목록 불러오는 중...</p>}
+        {sheetTabs.length > 0 && (
+          <div className="mt-1.5">
+            <label className="text-xs text-gray-500 mb-1 block">탭 선택</label>
+            <select
+              className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 bg-white"
+              value={selectedTab}
+              onChange={e => setSelectedTab(e.target.value)}
+              disabled={busy}>
+              {sheetTabs.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+        )}
         <p className="text-xs text-gray-400 mt-0.5">생성된 케이스를 시트에 저장하거나 시트에서 불러옵니다</p>
       </div>
     </div>

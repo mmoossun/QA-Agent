@@ -14,20 +14,32 @@ import {
   appendTestCases,
   writeAllTestCases,
   updateTestCaseStatus,
+  getSheetTabs,
+  getRawHeaders,
   type TestCase,
 } from "@/lib/google-sheets";
 
-// ── GET: read test cases from sheet ──────────────────────────
+// ── GET: read test cases from sheet (or list tabs) ───────────
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const sheetId = searchParams.get("sheetId");
-  const tab = searchParams.get("tab") ?? "TestCases";
+  const tab = searchParams.get("tab") ?? undefined;
+  const tabsOnly = searchParams.get("tabs") === "1";
+  const headersOnly = searchParams.get("headers") === "1";
 
   if (!sheetId) {
     return NextResponse.json({ error: "sheetId is required" }, { status: 400 });
   }
 
   try {
+    if (tabsOnly) {
+      const tabs = await getSheetTabs(sheetId);
+      return NextResponse.json({ tabs });
+    }
+    if (headersOnly) {
+      const headers = await getRawHeaders(sheetId, tab);
+      return NextResponse.json({ headers });
+    }
     const testCases = await readSheet(sheetId, tab);
     return NextResponse.json({ testCases });
   } catch (err) {
