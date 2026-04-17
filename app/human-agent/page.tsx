@@ -1077,9 +1077,14 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ report }),
       });
-      if (!res.ok) throw new Error("저장 실패");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error("[saveReport] API error:", data);
+        throw new Error(data.error ?? "저장 실패");
+      }
       setSaveState("saved");
-    } catch {
+    } catch (err) {
+      console.error("[saveReport] failed:", err);
       setSaveState("error");
       setTimeout(() => setSaveState("idle"), 3000);
     }

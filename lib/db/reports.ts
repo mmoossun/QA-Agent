@@ -3,10 +3,8 @@
  * Replaces the old file-based data/saved-reports.json approach.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/db/client";
 import type { TestReport } from "@/lib/human-agent/report-generator";
-
-const prisma = new PrismaClient();
 
 export interface SavedReport extends TestReport {
   savedAt: string;
@@ -15,7 +13,7 @@ export interface SavedReport extends TestReport {
 
 const MAX = 200;
 
-type PrismaRow = Awaited<ReturnType<typeof prisma.savedReport.findMany>>[number];
+import type { SavedReport as PrismaReportRow } from "@prisma/client";
 
 function toRow(r: SavedReport) {
   return {
@@ -38,7 +36,7 @@ function toRow(r: SavedReport) {
   };
 }
 
-function fromRow(row: PrismaRow): SavedReport {
+function fromRow(row: PrismaReportRow): SavedReport {
   return {
     id: row.id,
     name: row.name,
