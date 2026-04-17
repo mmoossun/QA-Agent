@@ -1007,21 +1007,35 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
     }
 
     // Strategy 3: CDP DOM click using backendDOMNodeId
+    // For iframe elements use the child frame's CDP session to avoid coordinate offset issues
     if (ref?.backendDOMNodeId) {
       try {
-        const client = await p.context().newCDPSession(p);
+        const targetFrame = ref.frameIndex ? this.frames[ref.frameIndex] : p;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const client = await p.context().newCDPSession(targetFrame as any);
         const { nodeIds } = await client.send("DOM.pushNodesByBackendIdsToFrontend", {
           backendNodeIds: [ref.backendDOMNodeId],
         }) as { nodeIds: number[] };
         if (nodeIds[0]) {
-          const { model } = await client.send("DOM.getBoxModel", { nodeId: nodeIds[0] }) as {
-            model: { content: number[] };
-          };
-          const c = model.content;                    // [x1,y1, x2,y2, x3,y3, x4,y4]
-          const cx = (c[0] + c[4]) / 2;            // left-x + right-x
-          const cy = (c[1] + c[5]) / 2;            // top-y  + bottom-y
-          await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1 });
-          await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1 });
+          // Use JS dispatchEvent — works in both main frame and iframes without coordinate math
+          const resolved = await client.send("DOM.resolveNode", { nodeId: nodeIds[0] }) as { object: { objectId?: string } };
+          if (resolved.object?.objectId) {
+            await client.send("Runtime.callFunctionOn", {
+              objectId: resolved.object.objectId,
+              functionDeclaration: "function() { this.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); }",
+            });
+            await client.detach();
+            return true;
+          }
+          // Fallback: coordinate click (main frame only — no iframe offset adjustment needed)
+          if (!ref.frameIndex) {
+            const { model } = await client.send("DOM.getBoxModel", { nodeId: nodeIds[0] }) as { model: { content: number[] } };
+            const c = model.content;
+            const cx = (c[0] + c[4]) / 2;
+            const cy = (c[1] + c[5]) / 2;
+            await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1 });
+            await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1 });
+          }
           await client.detach();
           return true;
         }
@@ -1059,7 +1073,11 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
     // Strategy 4: child frame fallback (for elements inside iframes)
     {
       const name = ref?.name || hint;
-      for (const childFrame of this.frames.slice(1)) {
+      const targetFrames = ref?.frameIndex
+        ? [this.frames[ref.frameIndex]].filter(Boolean)
+        : this.frames.slice(1);
+
+      for (const childFrame of targetFrames) {
         if (name) {
           for (const role of ["button", "link", "tab", "option", "menuitem"] as const) {
             try {
@@ -1079,6 +1097,42 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
             }
           } catch { /* try next frame */ }
         }
+
+        // For icon-only buttons (no label): try all visible buttons in the target frame
+        // This handles floating action buttons like chat widgets with no accessible name
+        if (ref?.frameIndex !== undefined && !ref?.name) {
+          try {
+            const buttons = childFrame.locator("button, [role='button']");
+            const count = await buttons.count();
+            for (let i = 0; i < count; i++) {
+              const btn = buttons.nth(i);
+              if (await btn.isVisible({ timeout: 1_000 }).catch(() => false)) {
+                await btn.scrollIntoViewIfNeeded();
+                await btn.click({ timeout: 5_000 });
+                return true;
+              }
+            }
+          } catch { /* try next */ }
+        }
+      }
+    }
+
+    // Strategy 4b: icon-only button in ANY iframe (last resort when ref has frameIndex but no name)
+    if (ref?.frameIndex) {
+      const frame = this.frames[ref.frameIndex];
+      if (frame) {
+        try {
+          const buttons = frame.locator("button, [role='button'], [role='link']");
+          const count = await buttons.count();
+          for (let i = 0; i < count; i++) {
+            const btn = buttons.nth(i);
+            if (await btn.isVisible({ timeout: 1_000 }).catch(() => false)) {
+              await btn.scrollIntoViewIfNeeded();
+              await btn.click({ timeout: 5_000 });
+              return true;
+            }
+          }
+        } catch { /* ignore */ }
       }
     }
 
