@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import type { HumanStep, HumanAgentResult } from "@/lib/human-agent/runner";
 import type { TestReport } from "@/lib/human-agent/report-generator";
+import { generateReportHTML, triggerDownload, safeFilename } from "@/lib/human-agent/report-export";
 import type { TestCase } from "@/lib/google-sheets";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -993,6 +994,7 @@ const FINDING_TYPE_ICON: Record<string, string> = { bug: "🐛", warning: "⚠�
 function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: () => void }) {
   const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [downloading, setDownloading] = useState<"html" | "json" | null>(null);
   const risk = RISK_CONFIG[report.riskLevel] ?? RISK_CONFIG.medium;
   const statusIcon = report.status === "done" ? "✅" : report.status === "fail" ? "❌" : "⏱";
   const bugs = report.findings.filter(f => f.type === "bug");
@@ -1015,6 +1017,23 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
     }
   };
 
+  const downloadHTML = async () => {
+    if (downloading) return;
+    setDownloading("html");
+    try {
+      const html = await generateReportHTML(report);
+      triggerDownload(html, `${safeFilename(report)}.html`, "text/html;charset=utf-8");
+    } finally { setDownloading(null); }
+  };
+
+  const downloadJSON = () => {
+    if (downloading) return;
+    setDownloading("json");
+    try {
+      triggerDownload(JSON.stringify(report, null, 2), `${safeFilename(report)}.json`, "application/json");
+    } finally { setDownloading(null); }
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
 
@@ -1034,29 +1053,41 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
               </span>
             </div>
           </div>
-          <div className="flex items-center justify-between mt-3">
+          <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
             <p className="text-xs text-gray-500">
               {new Date(report.createdAt).toLocaleString("ko-KR")} · {report.stepCount}스텝 · {(report.totalDurationMs / 1000).toFixed(1)}s
             </p>
-            <button
-              onClick={saveReport}
-              disabled={saveState !== "idle"}
-              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors
-                ${saveState === "saved" ? "bg-green-500 text-white cursor-default" :
-                  saveState === "error" ? "bg-red-500 text-white" :
-                  saveState === "saving" ? "bg-gray-500 text-white" :
-                  "bg-white text-gray-800 hover:bg-gray-100"}`}
-            >
-              {saveState === "saving" ? (
-                <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />저장 중...</>
-              ) : saveState === "saved" ? (
-                <>✓ 저장됨</>
-              ) : saveState === "error" ? (
-                <>✕ 저장 실패</>
-              ) : (
-                <>💾 리포트 저장</>
-              )}
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={downloadHTML} disabled={!!downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-60">
+                {downloading === "html"
+                  ? <><span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />생성 중...</>
+                  : <>⬇ HTML</>}
+              </button>
+              <button onClick={downloadJSON} disabled={!!downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-600 hover:bg-gray-500 text-white transition-colors disabled:opacity-60">
+                ⬇ JSON
+              </button>
+              <button
+                onClick={saveReport}
+                disabled={saveState !== "idle"}
+                className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors
+                  ${saveState === "saved" ? "bg-green-500 text-white cursor-default" :
+                    saveState === "error" ? "bg-red-500 text-white" :
+                    saveState === "saving" ? "bg-gray-500 text-white" :
+                    "bg-white text-gray-800 hover:bg-gray-100"}`}
+              >
+                {saveState === "saving" ? (
+                  <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />저장 중...</>
+                ) : saveState === "saved" ? (
+                  <>✓ 저장됨</>
+                ) : saveState === "error" ? (
+                  <>✕ 저장 실패</>
+                ) : (
+                  <>💾 리포트 저장</>
+                )}
+              </button>
+            </div>
           </div>
         </div>
 

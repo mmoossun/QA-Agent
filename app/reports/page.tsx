@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TestFinding } from "@/lib/human-agent/report-generator";
+import { generateReportHTML, triggerDownload, safeFilename } from "@/lib/human-agent/report-export";
 
 // ─── Types ─────────────────────────────────────────────────────
 interface ReportListItem {
@@ -184,11 +185,29 @@ function ReportDetail({
   onToggleFinding: (idx: number) => void;
   onDelete: () => void;
 }) {
+  const [downloading, setDownloading] = useState<"html" | "json" | null>(null);
   const risk = RISK_CONFIG[report.riskLevel] ?? RISK_CONFIG.medium;
   const statusIcon = report.status === "done" ? "✅" : report.status === "fail" ? "❌" : "⏱";
   const statusLabel = report.status === "done" ? "완료" : report.status === "fail" ? "버그 발견" : "최대 스텝";
   const bugs = report.findings.filter(f => f.type === "bug");
   const warnings = report.findings.filter(f => f.type === "warning");
+
+  const downloadHTML = async () => {
+    if (downloading) return;
+    setDownloading("html");
+    try {
+      const html = await generateReportHTML(report);
+      triggerDownload(html, `${safeFilename(report)}.html`, "text/html;charset=utf-8");
+    } finally { setDownloading(null); }
+  };
+
+  const downloadJSON = () => {
+    if (downloading) return;
+    setDownloading("json");
+    try {
+      triggerDownload(JSON.stringify(report, null, 2), `${safeFilename(report)}.json`, "application/json");
+    } finally { setDownloading(null); }
+  };
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
@@ -209,14 +228,26 @@ function ReportDetail({
               </span>
             </div>
           </div>
-          <div className="flex items-center justify-between mt-3">
+          <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
             <p className="text-xs text-gray-500">
               저장: {new Date(report.savedAt).toLocaleString("ko-KR")} · {report.stepCount}스텝 · {(report.totalDurationMs / 1000).toFixed(1)}s
             </p>
-            <button onClick={onDelete}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-900/50 text-red-300 hover:bg-red-800 transition-colors">
-              🗑 삭제
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={downloadHTML} disabled={!!downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-60">
+                {downloading === "html"
+                  ? <><span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />생성 중...</>
+                  : <>⬇ HTML</>}
+              </button>
+              <button onClick={downloadJSON} disabled={!!downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-600 hover:bg-gray-500 text-white transition-colors disabled:opacity-60">
+                ⬇ JSON
+              </button>
+              <button onClick={onDelete}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-900/50 text-red-300 hover:bg-red-800 transition-colors">
+                🗑 삭제
+              </button>
+            </div>
           </div>
         </div>
 
