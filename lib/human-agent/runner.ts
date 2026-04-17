@@ -889,10 +889,22 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
         }
 
         case "click": {
+          const pageCountBefore = p.context().pages().length;
           const clicked = await this._resolveAndClick(p, d.target ?? "", d.description);
           if (!clicked) throw new Error(`클릭 실패: 요소를 찾지 못했습니다 (${d.target} / "${d.description}")`);
           try { await p.waitForLoadState("networkidle", { timeout: 4_000 }); } catch { /* ignore */ }
-          await p.waitForTimeout(500);
+          await p.waitForTimeout(600);
+          // Detect popup / new tab opened by the click
+          const allPages = p.context().pages();
+          if (allPages.length > pageCountBefore) {
+            const newPage = allPages[allPages.length - 1];
+            try { await newPage.waitForLoadState("domcontentloaded", { timeout: 8_000 }); } catch { /* ignore */ }
+            this.page = newPage;
+            this.a11yCache = null;
+            this.qwenCache = null;
+            this.frames = [];
+            logger.info(`팝업/새 탭 감지 → 전환: ${newPage.url()}`);
+          }
           break;
         }
 
@@ -1010,6 +1022,33 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       } catch { /* ignore CDP fallback errors */ }
     }
 
+    // Strategy 3b: Shadow DOM pierce (web components / custom elements)
+    {
+      const searchText = (ref?.name || hint).slice(0, 60);
+      if (searchText) {
+        try {
+          const elHandle = await p.evaluateHandle((text: string) => {
+            function deepFind(root: Document | ShadowRoot): Element | null {
+              const tags = ['button', 'a', '[role="button"]', '[role="link"]', '[role="tab"]', '[role="menuitem"]'];
+              for (const sel of tags) {
+                for (const el of Array.from(root.querySelectorAll<Element>(sel))) {
+                  if ((el.textContent?.trim() ?? '').includes(text) || (el.getAttribute('aria-label') ?? '').includes(text)) return el;
+                }
+              }
+              for (const el of Array.from(root.querySelectorAll<Element>('*'))) {
+                const sr = (el as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot;
+                if (sr) { const f = deepFind(sr); if (f) return f; }
+              }
+              return null;
+            }
+            return deepFind(document);
+          }, searchText);
+          const el = elHandle.asElement();
+          if (el) { await el.scrollIntoViewIfNeeded(); await el.click({ timeout: 5_000 }); return true; }
+        } catch { /* ignore shadow pierce errors */ }
+      }
+    }
+
     // Strategy 4: child frame fallback (for elements inside iframes)
     {
       const name = ref?.name || hint;
@@ -1109,6 +1148,26 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
         }
         await client.detach();
       } catch { /* ignore */ }
+    }
+
+    // Strategy 5b: Shadow DOM pierce (for inputs inside web components)
+    if (ref?.inputType && ['email', 'text', 'password', 'search', 'url', 'tel', 'number'].includes(ref.inputType)) {
+      try {
+        const elHandle = await p.evaluateHandle((inputType: string) => {
+          function deepFind(root: Document | ShadowRoot): HTMLInputElement | null {
+            const found = root.querySelector<HTMLInputElement>(`input[type="${inputType}"]:not([disabled])`);
+            if (found) return found;
+            for (const el of Array.from(root.querySelectorAll<Element>('*'))) {
+              const sr = (el as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot;
+              if (sr) { const f = deepFind(sr); if (f) return f; }
+            }
+            return null;
+          }
+          return deepFind(document);
+        }, ref.inputType);
+        const el = elHandle.asElement();
+        if (el) { await el.click({ timeout: 3_000 }); await el.fill(value); return true; }
+      } catch { /* ignore shadow pierce errors */ }
     }
 
     // Strategy 6: child frame fallback
