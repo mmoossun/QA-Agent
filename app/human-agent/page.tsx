@@ -138,6 +138,8 @@ export default function HumanAgentPage() {
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const [reports, setReports]           = useState<Record<string, TestReport>>({});
   const [reportView, setReportView]     = useState<"steps" | "report">("steps");
+  const [cleaningUp, setCleaningUp]     = useState(false);
+  const [cleanupMsg, setCleanupMsg]     = useState<string | null>(null);
   const bottomRef                       = useRef<HTMLDivElement>(null);
 
   // ── Helpers ───────────────────────────────────────────────
@@ -257,6 +259,32 @@ export default function HumanAgentPage() {
   };
 
   // ── Save completed run to dashboard ──────────────────────
+  const cleanupSessions = async () => {
+    const targetsWithLogin = targets.filter(t => t.enabled && t.loginEmail && t.loginPassword && t.url);
+    if (targetsWithLogin.length === 0) {
+      setCleanupMsg("로그인 정보가 있는 URL이 없습니다.");
+      return;
+    }
+    setCleaningUp(true);
+    setCleanupMsg(null);
+    const results: string[] = [];
+    for (const t of targetsWithLogin) {
+      try {
+        const res = await fetch("/api/human-agent/logout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetUrl: t.url, loginEmail: t.loginEmail, loginPassword: t.loginPassword }),
+        });
+        const data = await res.json();
+        results.push(`${t.label}: ${data.message ?? (data.success ? "완료" : "실패")}`);
+      } catch (e) {
+        results.push(`${t.label}: 오류 발생`);
+      }
+    }
+    setCleanupMsg(results.join("\n"));
+    setCleaningUp(false);
+  };
+
   const saveToDashboard = async (target: TargetEntry, result: HumanAgentResult) => {
     try {
       const passCount = result.steps.filter(s => s.success).length;
@@ -594,6 +622,22 @@ export default function HumanAgentPage() {
                   className="w-full py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-white">
                   {running ? "실행 중..." : "▶ 테스트 시작"}
                 </button>
+
+                {/* Session cleanup */}
+                <div className="border-t pt-3 mt-1">
+                  <button
+                    onClick={cleanupSessions}
+                    disabled={busy || cleaningUp}
+                    className="w-full py-2 rounded-lg text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-gray-100 hover:bg-gray-200 text-gray-600"
+                  >
+                    {cleaningUp ? "로그아웃 중..." : "세션 정리 (이전 로그아웃)"}
+                  </button>
+                  {cleanupMsg && (
+                    <div className="mt-2 p-2 rounded bg-gray-50 border text-xs text-gray-600 whitespace-pre-line">
+                      {cleanupMsg}
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </div>

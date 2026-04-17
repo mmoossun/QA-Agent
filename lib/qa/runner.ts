@@ -114,11 +114,55 @@ export class QARunner {
   }
 
   async close(): Promise<void> {
+    // Auto-logout if we were logged in
+    if (this.config.loginEmail && this.context) {
+      await this._tryLogout();
+    }
     await this.context?.close();
     await this.browser?.close();
     // Clean up temp auth file
     if (this.authStatePath && fs.existsSync(this.authStatePath)) {
       fs.unlinkSync(this.authStatePath);
+    }
+  }
+
+  /** Try to log out via common URL paths or button/link selectors */
+  private async _tryLogout(): Promise<void> {
+    if (!this.context) return;
+    let page: Page | null = null;
+    try {
+      page = await this.context.newPage();
+      const origin = new URL(this.config.baseUrl).origin;
+
+      // 1) Try common logout URLs
+      for (const p of ["/logout", "/signout", "/sign-out", "/auth/logout", "/api/auth/signout"]) {
+        try {
+          const res = await page.goto(`${origin}${p}`, { timeout: 6_000, waitUntil: "domcontentloaded" });
+          if (res && res.ok()) { logger.info(`QA logout via URL: ${p}`); return; }
+        } catch { /* try next */ }
+      }
+
+      // 2) Go to baseUrl and find logout button/link
+      await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      const logoutSelectors = [
+        'a[href*="logout"]', 'a[href*="signout"]',
+        'button:has-text("로그아웃")', 'a:has-text("로그아웃")',
+        'button:has-text("Logout")', 'button:has-text("Log out")',
+        '[aria-label*="logout" i]', '[aria-label*="로그아웃"]',
+      ];
+      for (const sel of logoutSelectors) {
+        if (await page.locator(sel).count() > 0) {
+          await page.locator(sel).first().click({ timeout: 3_000 });
+          await page.waitForTimeout(1000);
+          logger.info(`QA logout via selector: ${sel}`);
+          return;
+        }
+      }
+      logger.warn("QA runner: no logout button found");
+    } catch (e) {
+      logger.warn({ e }, "QA runner logout failed");
+    } finally {
+      await page?.close();
     }
   }
 

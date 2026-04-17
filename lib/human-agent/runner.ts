@@ -340,6 +340,11 @@ export class HumanAgentRunner {
         summary = `최대 ${maxSteps} 스텝 도달. 마지막 관찰: ${this.steps.at(-1)?.decision.observation ?? ""}`;
       }
 
+      // Auto-logout after test completes (only if we logged in)
+      if (this.config.loginEmail && this.config.loginPassword) {
+        await this._tryLogout();
+      }
+
       return {
         sessionId: this.sessionId,
         goal: this.config.goal,
@@ -464,6 +469,88 @@ export class HumanAgentRunner {
       }
     } catch (e) {
       logger.warn({ e }, "Login attempt failed");
+    }
+  }
+
+  // ── Logout: try common logout patterns ───────────────────
+  async _tryLogout(): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      // 1) Try common logout URL paths first
+      const origin = new URL(this.page.url()).origin;
+      for (const path of ["/logout", "/signout", "/sign-out", "/auth/logout", "/api/auth/signout", "/accounts/logout"]) {
+        try {
+          const res = await this.page.goto(`${origin}${path}`, { timeout: 8_000, waitUntil: "domcontentloaded" });
+          if (res && res.ok()) {
+            await this.page.waitForTimeout(1000);
+            logger.info(`Logged out via URL: ${path}`);
+            return true;
+          }
+        } catch { /* try next */ }
+      }
+
+      // 2) Try clicking logout button/link via common text/aria patterns
+      const logoutSelectors = [
+        'a[href*="logout"]', 'a[href*="signout"]', 'a[href*="sign-out"]',
+        'button:has-text("로그아웃")', 'a:has-text("로그아웃")',
+        'button:has-text("Logout")', 'button:has-text("Log out")',
+        'a:has-text("Logout")', 'a:has-text("Log out")',
+        '[aria-label*="logout" i]', '[aria-label*="로그아웃"]',
+      ];
+      for (const sel of logoutSelectors) {
+        try {
+          if (await this.page.locator(sel).count() > 0) {
+            await this.page.locator(sel).first().click({ timeout: 3_000 });
+            await this.page.waitForTimeout(1500);
+            logger.info(`Logged out via selector: ${sel}`);
+            return true;
+          }
+        } catch { /* try next */ }
+      }
+
+      // 3) A11y-based: find button/link with logout-related text
+      const refs = await this._snapshotA11y(true);
+      const logoutRef = refs.find(r =>
+        ["button", "link"].includes(r.role) &&
+        (r.name?.includes("로그아웃") || r.name?.toLowerCase().includes("logout") ||
+         r.name?.toLowerCase().includes("log out") || r.name?.toLowerCase().includes("sign out"))
+      );
+      if (logoutRef) {
+        await this._resolveAndClick(this.page, logoutRef.ref, logoutRef.name);
+        await this.page.waitForTimeout(1500);
+        logger.info(`Logged out via a11y: ${logoutRef.name}`);
+        return true;
+      }
+
+      // 4) Account/profile menu — open it first, then look for logout
+      const menuRef = refs.find(r =>
+        ["button", "link"].includes(r.role) &&
+        (r.name?.includes("프로필") || r.name?.includes("계정") || r.name?.includes("내 정보") ||
+         r.name?.toLowerCase().includes("account") || r.name?.toLowerCase().includes("profile") ||
+         r.name?.toLowerCase().includes("my page"))
+      );
+      if (menuRef) {
+        await this._resolveAndClick(this.page, menuRef.ref, menuRef.name);
+        await this.page.waitForTimeout(800);
+        const refsAfter = await this._snapshotA11y(true);
+        const logoutAfter = refsAfter.find(r =>
+          ["button", "link"].includes(r.role) &&
+          (r.name?.includes("로그아웃") || r.name?.toLowerCase().includes("logout") ||
+           r.name?.toLowerCase().includes("sign out"))
+        );
+        if (logoutAfter) {
+          await this._resolveAndClick(this.page, logoutAfter.ref, logoutAfter.name);
+          await this.page.waitForTimeout(1500);
+          logger.info(`Logged out via menu: ${logoutAfter.name}`);
+          return true;
+        }
+      }
+
+      logger.warn("Could not find logout button/URL");
+      return false;
+    } catch (e) {
+      logger.warn({ e }, "Logout attempt failed");
+      return false;
     }
   }
 
