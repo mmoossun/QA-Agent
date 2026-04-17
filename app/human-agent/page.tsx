@@ -992,10 +992,28 @@ const FINDING_TYPE_ICON: Record<string, string> = { bug: "🐛", warning: "⚠�
 
 function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: () => void }) {
   const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const risk = RISK_CONFIG[report.riskLevel] ?? RISK_CONFIG.medium;
   const statusIcon = report.status === "done" ? "✅" : report.status === "fail" ? "❌" : "⏱";
   const bugs = report.findings.filter(f => f.type === "bug");
   const warnings = report.findings.filter(f => f.type === "warning");
+
+  const saveReport = async () => {
+    if (saveState !== "idle") return;
+    setSaveState("saving");
+    try {
+      const res = await fetch("/api/reports/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ report }),
+      });
+      if (!res.ok) throw new Error("저장 실패");
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+      setTimeout(() => setSaveState("idle"), 3000);
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
@@ -1016,9 +1034,30 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
               </span>
             </div>
           </div>
-          <p className="text-xs text-gray-500 mt-3">
-            {new Date(report.createdAt).toLocaleString("ko-KR")} · {report.stepCount}스텝 · {(report.totalDurationMs / 1000).toFixed(1)}s
-          </p>
+          <div className="flex items-center justify-between mt-3">
+            <p className="text-xs text-gray-500">
+              {new Date(report.createdAt).toLocaleString("ko-KR")} · {report.stepCount}스텝 · {(report.totalDurationMs / 1000).toFixed(1)}s
+            </p>
+            <button
+              onClick={saveReport}
+              disabled={saveState !== "idle"}
+              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors
+                ${saveState === "saved" ? "bg-green-500 text-white cursor-default" :
+                  saveState === "error" ? "bg-red-500 text-white" :
+                  saveState === "saving" ? "bg-gray-500 text-white" :
+                  "bg-white text-gray-800 hover:bg-gray-100"}`}
+            >
+              {saveState === "saving" ? (
+                <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />저장 중...</>
+              ) : saveState === "saved" ? (
+                <>✓ 저장됨</>
+              ) : saveState === "error" ? (
+                <>✕ 저장 실패</>
+              ) : (
+                <>💾 리포트 저장</>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Metrics bar */}
