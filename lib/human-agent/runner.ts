@@ -112,7 +112,7 @@ const INTERACTIVE_ROLES = new Set([
 ]);
 
 // Actions that may change page structure → invalidate A11y cache
-const CACHE_BUSTING_ACTIONS = new Set<HumanAction>(["navigate", "click", "select", "press", "type"]);
+const CACHE_BUSTING_ACTIONS = new Set<HumanAction>(["navigate", "click", "select", "press", "type", "fill", "scroll", "hover"]);
 
 // ─── Planning System Prompt ───────────────────────────────────
 function buildPlanningSystem(goal: string, categories: string[], similarContext = ""): string {
@@ -190,6 +190,13 @@ export class HumanAgentRunner {
       timezoneId: "Asia/Seoul",
     });
     this.page = await ctx.newPage();
+
+    // Auto-accept browser native dialogs (alert / confirm / prompt / beforeunload)
+    // so they never freeze the agent loop.
+    ctx.on("dialog", async (dialog) => {
+      logger.info(`[dialog] type=${dialog.type()} msg="${dialog.message().slice(0, 80)}" → accepted`);
+      try { await dialog.accept(); } catch { /* already dismissed */ }
+    });
 
     try {
       await this.page.goto(this.config.targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -1168,6 +1175,40 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
         const el = elHandle.asElement();
         if (el) { await el.click({ timeout: 3_000 }); await el.fill(value); return true; }
       } catch { /* ignore shadow pierce errors */ }
+    }
+
+    // Strategy 5c: contenteditable rich-text editor (Quill, TipTap, ProseMirror, chat inputs)
+    // Playwright fill() doesn't work on contenteditable divs — must click + selectAll + type
+    {
+      const hint = ref?.name || ref?.placeholder || "";
+      try {
+        // Find nearest contenteditable — by aria-label/placeholder attr match, or first visible
+        const ceHandle = await p.evaluateHandle((hintText: string) => {
+          const all = Array.from(document.querySelectorAll<HTMLElement>('[contenteditable="true"]:not([disabled])'));
+          if (!all.length) return null;
+          if (hintText) {
+            const match = all.find(el =>
+              (el.getAttribute('aria-label') ?? '').includes(hintText) ||
+              (el.getAttribute('placeholder') ?? '').includes(hintText) ||
+              (el.getAttribute('data-placeholder') ?? '').includes(hintText)
+            );
+            if (match) return match;
+          }
+          // Fall back to first visible contenteditable
+          return all.find(el => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }) ?? null;
+        }, hint);
+        const ceEl = ceHandle.asElement();
+        if (ceEl) {
+          await ceEl.scrollIntoViewIfNeeded();
+          await ceEl.click({ timeout: 3_000 });
+          await p.keyboard.press("Control+a");
+          await p.keyboard.type(value, { delay: 20 });
+          return true;
+        }
+      } catch { /* ignore contenteditable errors */ }
     }
 
     // Strategy 6: child frame fallback
