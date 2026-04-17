@@ -17,11 +17,11 @@ export default function HomePage() {
           your app and write comprehensive tests automatically.
         </p>
         <div className="flex gap-4 justify-center">
-          <Link href="/chat" className="btn-primary text-base px-6 py-3">
-            Start Chat QA
+          <Link href="/human-agent" className="btn-primary text-base px-6 py-3">
+            Run Auto Agent (Human)
           </Link>
-          <Link href="/agent" className="btn-secondary text-base px-6 py-3">
-            Run Auto Agent
+          <Link href="/chat" className="btn-secondary text-base px-6 py-3">
+            Start Chat QA
           </Link>
         </div>
       </div>
