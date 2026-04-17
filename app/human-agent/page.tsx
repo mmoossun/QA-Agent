@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import type { HumanStep, HumanAgentResult } from "@/lib/human-agent/runner";
+import type { TestReport } from "@/lib/human-agent/report-generator";
 import type { TestCase } from "@/lib/google-sheets";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -131,6 +132,8 @@ export default function HumanAgentPage() {
   const [running, setRunning]           = useState(false);
   const [activeTab, setActiveTab]       = useState<string>("");
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
+  const [reports, setReports]           = useState<Record<string, TestReport>>({});
+  const [reportView, setReportView]     = useState<"steps" | "report">("steps");
   const bottomRef                       = useRef<HTMLDivElement>(null);
 
   // ── Helpers ───────────────────────────────────────────────
@@ -285,6 +288,9 @@ export default function HumanAgentPage() {
           else if (evt.type === "complete") {
             setRuns(p => p.map((r, idx) => idx === i ? { ...r, result: evt.result, status: evt.result.status } : r));
             saveToDashboard(target, evt.result);
+          } else if (evt.type === "report") {
+            setReports(p => ({ ...p, [target.id]: evt.report }));
+            setReportView("report");
           } else if (evt.type === "error")
             setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
         } catch { /* ignore */ }
@@ -298,6 +304,8 @@ export default function HumanAgentPage() {
     if (!active.length || running) return;
     setRunning(true);
     setExpandedStep(null);
+    setReports({});
+    setReportView("steps");
     const initial: TargetRun[] = active.map(t => ({ target: t, steps: [], result: null, status: "pending" }));
     setRuns(initial);
     setActiveTab(active[0].id);
@@ -342,6 +350,8 @@ export default function HumanAgentPage() {
     setMode("run");
     setRunning(true);
     setExpandedStep(null);
+    setReports({});
+    setReportView("steps");
     const initial: TargetRun[] = active.map(t => ({ target: t, steps: [], result: null, status: "pending" }));
     setRuns(initial);
     setActiveTab(active[0].id);
@@ -623,21 +633,36 @@ export default function HumanAgentPage() {
         {/* ── Run mode ─────────────────────────────────────── */}
         {mode === "run" && (
           <>
-            {/* Tabs */}
-            {runs.length > 1 && (
-              <div className="flex border-b overflow-x-auto bg-white">
-                {runs.map(r => {
-                  const statusDot = r.status === "done" ? "bg-green-400" : r.status === "fail" ? "bg-red-400" : r.status === "running" ? "bg-blue-400 animate-pulse" : r.status === "error" ? "bg-red-400" : "bg-gray-300";
-                  return (
-                    <button key={r.target.id} onClick={() => setActiveTab(r.target.id)}
-                      className={`px-4 py-2 text-xs whitespace-nowrap border-b-2 flex items-center gap-1.5 transition-colors ${activeTab === r.target.id ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                      <span className={`w-2 h-2 rounded-full ${statusDot}`} />
-                      {r.target.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            {/* Target tabs + view toggle */}
+            <div className="flex items-center border-b bg-white">
+              {runs.length > 1 && (
+                <div className="flex overflow-x-auto">
+                  {runs.map(r => {
+                    const statusDot = r.status === "done" ? "bg-green-400" : r.status === "fail" ? "bg-red-400" : r.status === "running" ? "bg-blue-400 animate-pulse" : r.status === "error" ? "bg-red-400" : "bg-gray-300";
+                    return (
+                      <button key={r.target.id} onClick={() => setActiveTab(r.target.id)}
+                        className={`px-4 py-2 text-xs whitespace-nowrap border-b-2 flex items-center gap-1.5 transition-colors ${activeTab === r.target.id ? "border-blue-500 text-blue-600 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+                        <span className={`w-2 h-2 rounded-full ${statusDot}`} />
+                        {r.target.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Steps / Report toggle — shown once run completes */}
+              {activeRun?.result && !running && (
+                <div className="ml-auto flex items-center gap-1 px-3 py-1.5">
+                  <button onClick={() => setReportView("steps")}
+                    className={`px-3 py-1 text-xs rounded-l-lg border transition-colors ${reportView === "steps" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"}`}>
+                    📋 스텝
+                  </button>
+                  <button onClick={() => setReportView("report")}
+                    className={`px-3 py-1 text-xs rounded-r-lg border-t border-r border-b transition-colors ${reportView === "report" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"}`}>
+                    📊 리포트 {reports[activeTab ?? ""] ? "" : "생성 중…"}
+                  </button>
+                </div>
+              )}
+            </div>
 
             <div className="flex-1 overflow-y-auto">
               {runs.length === 0 && (
@@ -648,29 +673,37 @@ export default function HumanAgentPage() {
                 </div>
               )}
 
-              {activeRun && (
-                <div className="divide-y">
-                  {activeRun.steps.map(step => (
-                    <StepCard key={step.stepNumber} step={step}
-                      expanded={expandedStep === step.stepNumber}
-                      onToggle={() => setExpandedStep(expandedStep === step.stepNumber ? null : step.stepNumber)}
-                    />
-                  ))}
-                </div>
+              {/* Step list view */}
+              {activeRun && reportView === "steps" && (
+                <>
+                  <div className="divide-y">
+                    {activeRun.steps.map(step => (
+                      <StepCard key={step.stepNumber} step={step}
+                        expanded={expandedStep === step.stepNumber}
+                        onToggle={() => setExpandedStep(expandedStep === step.stepNumber ? null : step.stepNumber)}
+                      />
+                    ))}
+                  </div>
+                  {running && activeRun.status === "running" && (
+                    <div className="p-4 flex items-center gap-3 text-sm text-gray-500">
+                      <span className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                      화면 분석 중...
+                    </div>
+                  )}
+                  {activeRun.result && !running && (
+                    <RunResultOverview run={activeRun} onRerun={() => { setRuns([]); setReports({}); startRun(); }} />
+                  )}
+                </>
               )}
 
-              {running && activeRun?.status === "running" && (
-                <div className="p-4 flex items-center gap-3 text-sm text-gray-500">
-                  <span className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                  화면 분석 중...
-                </div>
-              )}
-
-              {activeRun?.result && !running && (
-                <RunResultOverview
-                  run={activeRun}
-                  onRerun={() => { setRuns([]); startRun(); }}
-                />
+              {/* Report view */}
+              {activeRun && reportView === "report" && (
+                activeTab && reports[activeTab]
+                  ? <ReportView report={reports[activeTab]} onViewSteps={() => setReportView("steps")} />
+                  : <div className="flex flex-col items-center justify-center h-64 text-gray-400 gap-3">
+                      <span className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                      <p className="text-sm">AI 리포트 생성 중…</p>
+                    </div>
               )}
 
               {activeRun?.status === "error" && (
@@ -938,6 +971,209 @@ function StepCard({ step, expanded, onToggle }: { step: HumanStep; expanded: boo
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Report View ────────────────────────────────────────────────
+const RISK_CONFIG: Record<string, { label: string; bg: string; text: string; border: string }> = {
+  low:      { label: "낮음",   bg: "bg-green-50",  text: "text-green-700",  border: "border-green-200" },
+  medium:   { label: "보통",   bg: "bg-yellow-50", text: "text-yellow-700", border: "border-yellow-200" },
+  high:     { label: "높음",   bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-200" },
+  critical: { label: "심각",   bg: "bg-red-50",    text: "text-red-700",    border: "border-red-200" },
+};
+const SEVERITY_CONFIG: Record<string, { label: string; dot: string; text: string }> = {
+  critical: { label: "Critical", dot: "bg-red-500",    text: "text-red-700" },
+  high:     { label: "High",     dot: "bg-orange-500", text: "text-orange-700" },
+  medium:   { label: "Medium",   dot: "bg-yellow-500", text: "text-yellow-700" },
+  low:      { label: "Low",      dot: "bg-blue-400",   text: "text-blue-700" },
+};
+const FINDING_TYPE_ICON: Record<string, string> = { bug: "🐛", warning: "⚠️", info: "ℹ️" };
+
+function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: () => void }) {
+  const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
+  const risk = RISK_CONFIG[report.riskLevel] ?? RISK_CONFIG.medium;
+  const statusIcon = report.status === "done" ? "✅" : report.status === "fail" ? "❌" : "⏱";
+  const bugs = report.findings.filter(f => f.type === "bug");
+  const warnings = report.findings.filter(f => f.type === "warning");
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 space-y-6">
+
+      {/* ── Report Header ─────────────────────────────────── */}
+      <div className="rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+        <div className="px-6 py-5 bg-gradient-to-r from-gray-900 to-gray-700 text-white">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-gray-400 mb-1">QA TEST REPORT</p>
+              <h2 className="text-lg font-bold truncate">{report.targetUrl}</h2>
+              <p className="text-sm text-gray-300 mt-1 line-clamp-2">{report.goal || "자유 탐색 QA"}</p>
+            </div>
+            <div className="flex flex-col items-end gap-2 shrink-0">
+              <span className="text-2xl">{statusIcon}</span>
+              <span className={`text-xs px-3 py-1 rounded-full font-semibold border ${risk.bg} ${risk.text} ${risk.border}`}>
+                위험도: {risk.label}
+              </span>
+            </div>
+          </div>
+          <p className="text-xs text-gray-500 mt-3">
+            {new Date(report.createdAt).toLocaleString("ko-KR")} · {report.stepCount}스텝 · {(report.totalDurationMs / 1000).toFixed(1)}s
+          </p>
+        </div>
+
+        {/* Metrics bar */}
+        <div className="grid grid-cols-4 divide-x bg-white">
+          {[
+            { label: "성공률", value: `${report.passRate.toFixed(0)}%`, sub: `${Math.round(report.stepCount * report.passRate / 100)}/${report.stepCount} 스텝` },
+            { label: "발견된 버그", value: String(bugs.length), sub: bugs.length === 0 ? "발견 없음" : `${bugs.filter(b => b.severity === "critical" || b.severity === "high").length}개 Critical/High` },
+            { label: "경고", value: String(warnings.length), sub: "Warning 항목" },
+            { label: "테스트 항목", value: String(report.testedFeatures.length), sub: "검증된 기능" },
+          ].map(m => (
+            <div key={m.label} className="px-5 py-4 text-center">
+              <p className="text-2xl font-bold text-gray-800">{m.value}</p>
+              <p className="text-xs text-gray-500 mt-0.5">{m.label}</p>
+              <p className="text-xs text-gray-400">{m.sub}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Executive Summary ─────────────────────────────── */}
+      <div className="rounded-xl border border-gray-200 bg-white p-5">
+        <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+          <span className="w-5 h-5 bg-blue-100 text-blue-600 rounded flex items-center justify-center text-xs">📝</span>
+          종합 요약
+        </h3>
+        <p className="text-sm text-gray-700 leading-relaxed">{report.executiveSummary}</p>
+
+        {report.testedFeatures.length > 0 && (
+          <div className="mt-4">
+            <p className="text-xs font-semibold text-gray-500 mb-2">테스트된 기능</p>
+            <div className="flex flex-wrap gap-1.5">
+              {report.testedFeatures.map((f, i) => (
+                <span key={i} className="text-xs px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full border border-blue-100">{f}</span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Findings ──────────────────────────────────────── */}
+      {report.findings.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="px-5 py-4 border-b bg-gray-50">
+            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+              <span>🔍</span> 발견사항 ({report.findings.length}건)
+            </h3>
+          </div>
+          <div className="divide-y">
+            {report.findings.map((f, idx) => {
+              const sev = SEVERITY_CONFIG[f.severity] ?? SEVERITY_CONFIG.medium;
+              const expanded = expandedFinding === idx;
+              return (
+                <div key={idx} className="hover:bg-gray-50 transition-colors">
+                  <button onClick={() => setExpandedFinding(expanded ? null : idx)}
+                    className="w-full px-5 py-4 flex items-start gap-3 text-left">
+                    <span className="text-base shrink-0 mt-0.5">{FINDING_TYPE_ICON[f.type] ?? "•"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className={`flex items-center gap-1 text-xs font-semibold ${sev.text}`}>
+                          <span className={`w-2 h-2 rounded-full ${sev.dot}`} />
+                          {sev.label}
+                        </span>
+                        <span className="text-xs text-gray-400">Step {f.stepNumber}</span>
+                      </div>
+                      <p className="text-sm font-medium text-gray-800">{f.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{f.description}</p>
+                    </div>
+                    <svg className={`w-4 h-4 text-gray-400 shrink-0 mt-1 transition-transform ${expanded ? "rotate-180" : ""}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {expanded && (
+                    <div className="px-5 pb-5 space-y-4 bg-gray-50 border-t">
+                      {/* Screenshot */}
+                      {f.screenshotPath && (
+                        <div className="pt-4">
+                          <p className="text-xs font-semibold text-gray-500 mb-2">📸 스크린샷 (Step {f.stepNumber})</p>
+                          <a href={f.screenshotPath} target="_blank" rel="noopener noreferrer">
+                            <img src={f.screenshotPath} alt={`Finding ${idx + 1}`}
+                              className="rounded-lg border max-h-72 object-top object-cover w-full cursor-pointer hover:opacity-90 transition-opacity shadow-sm" />
+                          </a>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-1 gap-3 pt-2">
+                        {/* Description */}
+                        <div>
+                          <p className="text-xs font-semibold text-gray-500 mb-1">현상</p>
+                          <p className="text-sm text-gray-700 bg-white rounded-lg border px-3 py-2.5 leading-relaxed">{f.description}</p>
+                        </div>
+                        {/* Root cause */}
+                        <div>
+                          <p className="text-xs font-semibold text-red-500 mb-1">🔍 근본 원인 분석</p>
+                          <p className="text-sm text-gray-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2.5 leading-relaxed">{f.rootCause}</p>
+                        </div>
+                        {/* Reproduction */}
+                        <div>
+                          <p className="text-xs font-semibold text-gray-500 mb-1">재현 절차</p>
+                          <pre className="text-xs text-gray-700 bg-white rounded-lg border px-3 py-2.5 whitespace-pre-wrap font-sans leading-relaxed">{f.reproductionSteps}</pre>
+                        </div>
+                        {/* Recommendation */}
+                        <div>
+                          <p className="text-xs font-semibold text-blue-600 mb-1">💡 권고 사항</p>
+                          <p className="text-sm text-gray-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2.5 leading-relaxed">{f.recommendation}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Recommendations ───────────────────────────────── */}
+      {report.recommendations.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white p-5">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+            <span>💡</span> 개선 권고사항
+          </h3>
+          <ol className="space-y-2">
+            {report.recommendations.map((r, i) => (
+              <li key={i} className="flex gap-3 text-sm text-gray-700">
+                <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">{i + 1}</span>
+                <span className="leading-relaxed">{r}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {/* ── Step screenshots timeline ─────────────────────── */}
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+        <div className="px-5 py-4 border-b bg-gray-50 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+            <span>🎞️</span> 스텝별 스크린샷
+          </h3>
+          <button onClick={onViewSteps} className="text-xs text-blue-600 hover:text-blue-700">전체 스텝 로그 →</button>
+        </div>
+        <div className="grid grid-cols-3 gap-3 p-4">
+          {report.steps.filter(s => s.screenshotPath).map(s => (
+            <a key={s.stepNumber} href={s.screenshotPath} target="_blank" rel="noopener noreferrer" className="group relative block">
+              <img src={s.screenshotPath} alt={`Step ${s.stepNumber}`}
+                className="w-full rounded-lg border object-top object-cover aspect-video group-hover:opacity-90 transition-opacity" />
+              <div className={`absolute top-1.5 left-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold ${s.success ? "bg-green-600" : "bg-red-600"} text-white`}>
+                {s.success ? "✓" : "✗"} {s.stepNumber}
+              </div>
+              <p className="text-xs text-gray-500 mt-1 truncate">{s.decision.description}</p>
+            </a>
+          ))}
+        </div>
+      </div>
+
     </div>
   );
 }

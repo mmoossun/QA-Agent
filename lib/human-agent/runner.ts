@@ -81,6 +81,7 @@ export interface HumanAgentConfig {
   categories?: string[];
   customPrompt?: string;
   sheetRawTable?: string;
+  similarContext?: string;  // past similar test failures injected as context
   onStep?: (step: HumanStep) => void;
 }
 
@@ -114,14 +115,17 @@ const INTERACTIVE_ROLES = new Set([
 const CACHE_BUSTING_ACTIONS = new Set<HumanAction>(["navigate", "click", "select", "press", "type"]);
 
 // ─── Planning System Prompt ───────────────────────────────────
-function buildPlanningSystem(goal: string, categories: string[], customPrompt: string): string {
+function buildPlanningSystem(goal: string, categories: string[], customPrompt: string, similarContext = ""): string {
   const effectiveGoal = goal.trim() ||
     "Freely explore this web application and perform comprehensive QA testing — navigate all key features, try common user flows, and identify any bugs or issues.";
   const categoryLine = categories.length ? `\nFocus areas: ${categories.join(", ")}` : "";
   const customLine = customPrompt ? `\nAdditional instructions: ${customPrompt}` : "";
+  const memoryLine = similarContext
+    ? `\n\n## 과거 유사 테스트 참고 (실수 반복 방지)\n${similarContext}`
+    : "";
 
   return `You are an expert QA tester operating a web browser. You can SEE the current screenshot.
-YOUR GOAL (never forget this): "${effectiveGoal}"${categoryLine}${customLine}
+YOUR GOAL (never forget this): "${effectiveGoal}"${categoryLine}${customLine}${memoryLine}
 
 Each step you receive:
   1. A11Y_REFS — live interactive elements from the accessibility tree.
@@ -662,6 +666,7 @@ export class HumanAgentRunner {
       this.config.goal,
       this.config.categories ?? [],
       this.config.customPrompt ?? "",
+      this.config.similarContext ?? "",
     );
 
     try {
