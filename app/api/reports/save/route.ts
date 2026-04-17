@@ -1,17 +1,20 @@
 /**
  * POST /api/reports/save   — save a TestReport (from human-agent page)
  * GET  /api/reports/save   — list all saved reports (without steps to keep payload small)
+ * GET  /api/reports/save?id=... — single full report with steps
  * DELETE /api/reports/save?id=... — delete a report
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { saveReport, loadReports, deleteReport } from "@/lib/db/reports";
+import { saveReportAsync, loadReportsAsync, deleteReportAsync, getReportAsync } from "@/lib/db/reports";
+
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
     const { report, name } = await req.json();
     if (!report?.id) return NextResponse.json({ error: "report.id required" }, { status: 400 });
-    const saved = saveReport(report, name);
+    const saved = await saveReportAsync(report, name);
     return NextResponse.json({ ok: true, id: saved.id, savedAt: saved.savedAt });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -21,15 +24,14 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const id = new URL(req.url).searchParams.get("id");
 
-  // Single report with full steps (for detail view)
   if (id) {
-    const report = loadReports().find(r => r.id === id);
+    const report = await getReportAsync(id);
     if (!report) return NextResponse.json({ error: "not found" }, { status: 404 });
     return NextResponse.json({ report });
   }
 
-  // List without steps — keep payload light
-  const reports = loadReports().map(r => ({
+  const all = await loadReportsAsync();
+  const reports = all.map(r => ({
     id: r.id,
     name: r.name,
     savedAt: r.savedAt,
@@ -52,6 +54,6 @@ export async function GET(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
-  const ok = deleteReport(id);
+  const ok = await deleteReportAsync(id);
   return NextResponse.json({ ok });
 }

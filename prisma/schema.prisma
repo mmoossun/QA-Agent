@@ -103,6 +103,26 @@ model AgentRun {
   project   Project? @relation(fields: [projectId], references: [id])
 }
 
+// ─── SavedReport ─────────────────────────────────────────────
+model SavedReport {
+  id               String   @id
+  name             String
+  savedAt          DateTime @default(now())
+  createdAt        String
+  targetUrl        String
+  goal             String   @default("")
+  status           String
+  riskLevel        String
+  passRate         Float
+  stepCount        Int
+  totalDurationMs  Int
+  executiveSummary String
+  findings         String   // JSON
+  recommendations  String   // JSON
+  testedFeatures   String   // JSON
+  steps            String   // JSON
+}
+
 // ─── ImprovementHistory ─────────────────────────────────────
 model ImprovementHistory {
   id          String   @id @default(cuid())

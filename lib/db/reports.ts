@@ -1,54 +1,110 @@
 /**
- * File-based report store — data/saved-reports.json
+ * Persistent report store — backed by Prisma/SQLite (dev.db)
+ * Replaces the old file-based data/saved-reports.json approach.
  */
 
-import * as fs from "fs";
-import * as path from "path";
+import { PrismaClient } from "@prisma/client";
 import type { TestReport } from "@/lib/human-agent/report-generator";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const FILE = path.join(DATA_DIR, "saved-reports.json");
-const MAX = 200;
+const prisma = new PrismaClient();
 
 export interface SavedReport extends TestReport {
   savedAt: string;
-  name: string; // user-visible label
+  name: string;
 }
 
-function ensureFile(): void {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE)) fs.writeFileSync(FILE, "[]", "utf-8");
+const MAX = 200;
+
+type PrismaRow = Awaited<ReturnType<typeof prisma.savedReport.findMany>>[number];
+
+function toRow(r: SavedReport) {
+  return {
+    id: r.id,
+    name: r.name,
+    savedAt: new Date(r.savedAt),
+    createdAt: r.createdAt,
+    targetUrl: r.targetUrl,
+    goal: r.goal ?? "",
+    status: r.status,
+    riskLevel: r.riskLevel,
+    passRate: r.passRate,
+    stepCount: r.stepCount,
+    totalDurationMs: r.totalDurationMs,
+    executiveSummary: r.executiveSummary ?? "",
+    findings: JSON.stringify(r.findings ?? []),
+    recommendations: JSON.stringify(r.recommendations ?? []),
+    testedFeatures: JSON.stringify(r.testedFeatures ?? []),
+    steps: JSON.stringify(r.steps ?? []),
+  };
 }
 
-export function loadReports(): SavedReport[] {
+function fromRow(row: PrismaRow): SavedReport {
+  return {
+    id: row.id,
+    name: row.name,
+    savedAt: row.savedAt.toISOString(),
+    createdAt: row.createdAt,
+    targetUrl: row.targetUrl,
+    goal: row.goal,
+    status: row.status as SavedReport["status"],
+    riskLevel: row.riskLevel as SavedReport["riskLevel"],
+    passRate: row.passRate,
+    stepCount: row.stepCount,
+    totalDurationMs: row.totalDurationMs,
+    executiveSummary: row.executiveSummary,
+    findings: JSON.parse(row.findings),
+    recommendations: JSON.parse(row.recommendations),
+    testedFeatures: JSON.parse(row.testedFeatures),
+    steps: JSON.parse(row.steps),
+  };
+}
+
+export async function loadReportsAsync(): Promise<SavedReport[]> {
   try {
-    ensureFile();
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as SavedReport[];
+    const rows = await prisma.savedReport.findMany({
+      orderBy: { savedAt: "desc" },
+      take: MAX,
+    });
+    return rows.map(fromRow);
   } catch { return []; }
 }
 
-export function saveReport(report: TestReport, name?: string): SavedReport {
-  ensureFile();
+export async function saveReportAsync(report: TestReport, name?: string): Promise<SavedReport> {
   const saved: SavedReport = {
     ...report,
     savedAt: new Date().toISOString(),
     name: name ?? `${new Date().toLocaleDateString("ko-KR")} — ${report.targetUrl}`,
   };
-  const list = loadReports();
-  // Replace if same id already saved
-  const idx = list.findIndex(r => r.id === saved.id);
-  if (idx !== -1) list[idx] = saved;
-  else list.unshift(saved);
-  if (list.length > MAX) list.splice(MAX);
-  fs.writeFileSync(FILE, JSON.stringify(list, null, 2), "utf-8");
+
+  await prisma.savedReport.upsert({
+    where: { id: saved.id },
+    update: toRow(saved),
+    create: toRow(saved),
+  });
+
+  // Trim to MAX
+  const old = await prisma.savedReport.findMany({
+    orderBy: { savedAt: "desc" },
+    skip: MAX,
+    select: { id: true },
+  });
+  if (old.length > 0) {
+    await prisma.savedReport.deleteMany({ where: { id: { in: old.map(r => r.id) } } });
+  }
+
   return saved;
 }
 
-export function deleteReport(id: string): boolean {
-  ensureFile();
-  const list = loadReports();
-  const next = list.filter(r => r.id !== id);
-  if (next.length === list.length) return false;
-  fs.writeFileSync(FILE, JSON.stringify(next, null, 2), "utf-8");
-  return true;
+export async function deleteReportAsync(id: string): Promise<boolean> {
+  try {
+    await prisma.savedReport.delete({ where: { id } });
+    return true;
+  } catch { return false; }
+}
+
+export async function getReportAsync(id: string): Promise<SavedReport | null> {
+  try {
+    const row = await prisma.savedReport.findUnique({ where: { id } });
+    return row ? fromRow(row) : null;
+  } catch { return null; }
 }
