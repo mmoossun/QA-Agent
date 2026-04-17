@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TestFinding } from "@/lib/human-agent/report-generator";
+import type { HumanStep } from "@/lib/human-agent/runner";
 import { generateReportHTML, triggerDownload, safeFilename } from "@/lib/human-agent/report-export";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -21,6 +22,7 @@ interface ReportListItem {
   findings: TestFinding[];
   recommendations: string[];
   testedFeatures: string[];
+  steps?: HumanStep[];  // loaded on demand when report is selected
 }
 
 // ─── Config maps ───────────────────────────────────────────────
@@ -43,6 +45,7 @@ export default function ReportsPage() {
   const [reports, setReports]         = useState<ReportListItem[]>([]);
   const [loading, setLoading]         = useState(true);
   const [selected, setSelected]       = useState<ReportListItem | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   const [deleting, setDeleting]       = useState<string | null>(null);
   const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
   const [search, setSearch]           = useState("");
@@ -55,6 +58,23 @@ export default function ReportsPage() {
       setReports(data.reports ?? []);
     } catch {}
     finally { setLoading(false); }
+  };
+
+  // Fetch full report (with steps) when a report is selected
+  const selectReport = async (r: ReportListItem) => {
+    setSelected(r);
+    setExpandedFinding(null);
+    if (r.steps !== undefined) return; // already loaded
+    setLoadingDetail(true);
+    try {
+      const res = await fetch(`/api/reports/save?id=${r.id}`);
+      const data = await res.json();
+      if (data.report) {
+        setSelected(data.report as ReportListItem);
+        setReports(prev => prev.map(p => p.id === r.id ? { ...p, steps: data.report.steps } : p));
+      }
+    } catch {}
+    finally { setLoadingDetail(false); }
   };
 
   useEffect(() => { loadReports(); }, []);
@@ -116,7 +136,7 @@ export default function ReportsPage() {
             return (
               <div key={r.id}
                 className={`border-b cursor-pointer transition-colors ${isActive ? "bg-blue-50 border-l-2 border-l-blue-500" : "hover:bg-white"}`}
-                onClick={() => { setSelected(r); setExpandedFinding(null); }}>
+                onClick={() => selectReport(r)}>
                 <div className="px-4 py-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
@@ -166,6 +186,7 @@ export default function ReportsPage() {
         ) : (
           <ReportDetail
             report={selected}
+            loadingDetail={loadingDetail}
             expandedFinding={expandedFinding}
             onToggleFinding={idx => setExpandedFinding(expandedFinding === idx ? null : idx)}
             onDelete={() => handleDelete(selected.id)}
@@ -178,9 +199,10 @@ export default function ReportsPage() {
 
 // ─── Report Detail ─────────────────────────────────────────────
 function ReportDetail({
-  report, expandedFinding, onToggleFinding, onDelete,
+  report, loadingDetail, expandedFinding, onToggleFinding, onDelete,
 }: {
   report: ReportListItem;
+  loadingDetail: boolean;
   expandedFinding: number | null;
   onToggleFinding: (idx: number) => void;
   onDelete: () => void;
@@ -376,6 +398,100 @@ function ReportDetail({
         </div>
       )}
 
+      {/* Step log */}
+      {loadingDetail && (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 flex items-center justify-center gap-3 text-gray-400">
+          <span className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm">스텝 기록 불러오는 중…</span>
+        </div>
+      )}
+      {!loadingDetail && report.steps && report.steps.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="px-5 py-4 border-b bg-gray-50 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-700">🎞️ 스텝별 실행 기록</h3>
+            <span className="text-xs text-gray-400">{report.steps.length}스텝</span>
+          </div>
+          <div className="divide-y">
+            {report.steps.map(step => <StepRecord key={step.stepNumber} step={step} />)}
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// ─── Step Record ────────────────────────────────────────────────
+const ACTION_COLORS: Record<string, string> = {
+  click: "bg-blue-100 text-blue-700", fill: "bg-purple-100 text-purple-700",
+  navigate: "bg-gray-100 text-gray-600", wait: "bg-yellow-100 text-yellow-700",
+  scroll: "bg-cyan-100 text-cyan-700", press: "bg-orange-100 text-orange-700",
+  done: "bg-green-100 text-green-700", fail: "bg-red-100 text-red-700",
+  type: "bg-purple-100 text-purple-700", select: "bg-indigo-100 text-indigo-700",
+  hover: "bg-pink-100 text-pink-700",
+};
+const ACTION_ICONS: Record<string, string> = {
+  click: "👆", fill: "✏️", navigate: "🌐", wait: "⏳",
+  scroll: "📜", press: "⌨️", done: "✅", fail: "❌",
+  type: "⌨️", select: "🔽", hover: "🖱️",
+};
+
+function StepRecord({ step }: { step: HumanStep }) {
+  const [expanded, setExpanded] = useState(false);
+  const { success, decision, stepNumber, screenshotPath, durationMs } = step;
+  const colorClass = ACTION_COLORS[decision.action] ?? "bg-gray-100 text-gray-600";
+  const icon = ACTION_ICONS[decision.action] ?? "•";
+
+  return (
+    <div className={!success ? "bg-red-50" : ""}>
+      <button onClick={() => setExpanded(v => !v)}
+        className="w-full px-5 py-3 flex items-start gap-3 hover:bg-gray-50 transition-colors text-left">
+        <span className={`w-6 h-6 rounded-full text-xs flex items-center justify-center shrink-0 mt-0.5 font-medium ${success ? "bg-gray-200 text-gray-600" : "bg-red-200 text-red-700"}`}>
+          {stepNumber}
+        </span>
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full shrink-0 mt-0.5 ${colorClass}`}>
+          {icon} {decision.action}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm text-gray-800 leading-snug">{decision.description}</p>
+          {!success && step.error && (
+            <p className="text-xs text-red-500 mt-0.5 truncate">⚠ {step.error}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-xs text-gray-400">{(durationMs / 1000).toFixed(1)}s</span>
+          <svg className={`w-4 h-4 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="px-5 pb-4 space-y-3 bg-gray-50 border-t">
+          {screenshotPath && (
+            <div className="pt-3">
+              <p className="text-xs font-semibold text-gray-500 mb-2">📸 스크린샷</p>
+              <a href={screenshotPath} target="_blank" rel="noopener noreferrer">
+                <img src={screenshotPath} alt={`Step ${stepNumber}`}
+                  className="rounded-lg border max-h-64 object-top object-cover w-full cursor-pointer hover:opacity-90 transition-opacity shadow-sm" />
+              </a>
+            </div>
+          )}
+          {decision.observation && (
+            <div className="pt-1">
+              <p className="text-xs font-semibold text-gray-500 mb-1">페이지 상태</p>
+              <p className="text-xs text-gray-700 bg-white rounded-lg border px-3 py-2">{decision.observation}</p>
+            </div>
+          )}
+          {step.perception && (
+            <div>
+              <p className="text-xs font-semibold text-gray-500 mb-1">화면 인식</p>
+              <p className="text-xs text-gray-600 bg-white rounded-lg border px-3 py-2 leading-relaxed line-clamp-3">{step.perception}</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -18,8 +18,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
-  // Strip full step arrays to keep list lightweight
+export async function GET(req: NextRequest) {
+  const id = new URL(req.url).searchParams.get("id");
+
+  // Single report with full steps (for detail view)
+  if (id) {
+    const report = loadReports().find(r => r.id === id);
+    if (!report) return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json({ report });
+  }
+
+  // List without steps — keep payload light
   const reports = loadReports().map(r => ({
     id: r.id,
     name: r.name,
@@ -36,7 +45,6 @@ export async function GET() {
     findings: r.findings,
     recommendations: r.recommendations,
     testedFeatures: r.testedFeatures,
-    // steps omitted from list view for performance
   }));
   return NextResponse.json({ reports });
 }
