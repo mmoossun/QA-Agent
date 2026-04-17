@@ -18,7 +18,7 @@ export default function HomePage() {
         </p>
         <div className="flex gap-4 justify-center">
           <Link href="/human-agent" className="btn-primary text-base px-6 py-3">
-            Run Auto Agent (Human)
+            Run Auto Agent
           </Link>
           <Link href="/chat" className="btn-secondary text-base px-6 py-3">
             Start Chat QA
