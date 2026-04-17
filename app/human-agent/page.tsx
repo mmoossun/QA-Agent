@@ -108,9 +108,8 @@ export default function HumanAgentPage() {
   // ── Shared state ──────────────────────────────────────────
   const [mode, setMode]                 = useState<Mode>("generate");
   const [targets, setTargets]           = useState<TargetEntry[]>(DEFAULT_TARGETS);
-  const [goal, setGoal]                 = useState("채팅 위젯을 열고 '안녕하세요' 메시지를 보낸 후 응답을 확인해줘");
+  const [goal, setGoal]                 = useState("");
   const [categories, setCategories]     = useState<Set<Category>>(new Set(CATEGORIES.map(c => c.id)));
-  const [customPrompt, setCustomPrompt] = useState("");
   const [sheet, setSheet]               = useState<ParsedSheet | null>(null);
   const [fileError, setFileError]       = useState<string | null>(null);
   const [panelOpen, setPanelOpen]       = useState(true);
@@ -175,7 +174,6 @@ export default function HumanAgentPage() {
           targetUrl: primaryUrl,
           goal: goal.trim(),
           categories: Array.from(categories),
-          customPrompt: customPrompt.trim() || undefined,
           sheetRawTable: sheet?.rawTable || undefined,
           count: caseCount,
         }),
@@ -370,7 +368,6 @@ export default function HumanAgentPage() {
           loginPassword: target.loginPassword || undefined,
           maxSteps,
           categories: Array.from(categories),
-          customPrompt: customPrompt.trim() || undefined,
           sheetRawTable: sheet?.rawTable || undefined,
         });
       } catch (err) {
@@ -385,16 +382,12 @@ export default function HumanAgentPage() {
     const active = targets.filter(t => t.enabled && t.url.trim());
     if (!active.length || testCases.length === 0 || running) return;
 
-    // Synthesize goal and inject test cases as structured context
-    const synthesizedGoal = goal.trim() || "다음 테스트 케이스들을 순서대로 실행하며 QA를 수행해주세요";
+    // Synthesize goal — inject test cases into goal text
     const casesList = testCases.slice(0, 20)
       .map(tc => `[${tc.id}] ${tc.title}\n스텝: ${tc.steps}\n기대결과: ${tc.expectedResult}`)
       .join("\n\n");
-    const synthesizedCustomPrompt = [
-      `실행할 테스트 케이스 목록 (${testCases.length}개):`,
-      casesList,
-      customPrompt.trim() ? `\n추가 지시사항: ${customPrompt.trim()}` : "",
-    ].filter(Boolean).join("\n");
+    const userPart = goal.trim() ? `${goal.trim()}\n\n` : "";
+    const synthesizedGoal = `${userPart}다음 테스트 케이스들을 순서대로 실행하며 QA를 수행해주세요.\n\n실행할 테스트 케이스 목록 (${testCases.length}개):\n${casesList}`;
 
     setMode("run");
     setRunning(true);
@@ -416,7 +409,6 @@ export default function HumanAgentPage() {
           loginPassword: target.loginPassword || undefined,
           maxSteps,
           categories: Array.from(categories),
-          customPrompt: synthesizedCustomPrompt,
           sheetRawTable: sheet?.rawTable || undefined,
         });
       } catch (err) {
@@ -449,13 +441,13 @@ export default function HumanAgentPage() {
         </div>
       </div>
 
-      {/* Goal */}
+      {/* Instructions */}
       <div>
-        <label className="text-xs font-medium text-gray-600 block mb-1">테스트 목표 <span className="text-gray-400 font-normal">(선택)</span></label>
+        <label className="text-xs font-medium text-gray-600 block mb-1">테스트 지시사항 <span className="text-gray-400 font-normal">(선택)</span></label>
         <textarea className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
-          rows={3} value={goal} onChange={e => setGoal(e.target.value)}
-          placeholder="예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘&#10;&#10;비워두면 AI가 최적 시나리오를 자유롭게 판단합니다" disabled={busy} />
-        <p className="text-xs text-gray-400 mt-0.5">비워두면 AI가 사이트를 자유롭게 탐색하며 QA를 수행합니다</p>
+          rows={4} value={goal} onChange={e => setGoal(e.target.value)}
+          placeholder={"예: 채팅 위젯을 열고 메시지를 보낸 후 응답을 확인해줘\n예: 로그인 후 설정 페이지에서 프로필 수정 기능을 테스트해줘\n\n비워두면 AI가 사이트를 자유롭게 탐색합니다"}
+          disabled={busy} />
       </div>
 
       {/* Sheet Upload */}
@@ -492,14 +484,6 @@ export default function HumanAgentPage() {
             </button>
           ))}
         </div>
-      </div>
-
-      {/* Custom Instructions */}
-      <div>
-        <label className="text-xs font-medium text-gray-600 block mb-1">사용자 지시사항 (선택)</label>
-        <textarea className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white resize-none"
-          rows={2} value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
-          placeholder="예: 반드시 모바일 뷰포트 기준으로 테스트해줘" disabled={busy} />
       </div>
 
       {/* Google Sheet ID (both modes) */}

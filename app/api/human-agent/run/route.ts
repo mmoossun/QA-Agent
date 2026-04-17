@@ -20,12 +20,11 @@ export const dynamic = "force-dynamic";
 
 const RequestSchema = z.object({
   targetUrl: z.string().url(),
-  goal: z.string().max(500).optional().default(""),
+  goal: z.string().max(1000).optional().default(""),
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
   maxSteps: z.number().min(1).max(100).default(20),
   categories: z.array(z.string()).optional(),
-  customPrompt: z.string().optional(),
   sheetRawTable: z.string().optional(),
 });
 
@@ -41,7 +40,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { targetUrl, goal, loginEmail, loginPassword, maxSteps, categories, customPrompt, sheetRawTable } = parsed.data;
+    const { targetUrl, goal, loginEmail, loginPassword, maxSteps, categories, sheetRawTable } = parsed.data;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -96,7 +95,6 @@ export async function POST(req: NextRequest) {
             loginPassword,
             maxSteps,
             categories,
-            customPrompt,
             sheetRawTable,
             similarContext,
             onStep: (step) => send({ type: "step", step }),
