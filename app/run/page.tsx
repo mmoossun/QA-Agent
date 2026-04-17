@@ -795,6 +795,8 @@ export default function QuickRunPage() {
   const [isRunning, setIsRunning]   = useState(false);
   const [results, setResults]       = useState<RunResult[]>([]);
   const [bulkPw, setBulkPw]         = useState("");
+  const [cleaningUp, setCleaningUp] = useState(false);
+  const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
 
   const allGroups = Object.keys(GROUP_META) as AllGroups[];
   const filtered  = groupFilter === "all" ? SCENARIOS : SCENARIOS.filter((s) => s.group === groupFilter);
@@ -829,6 +831,24 @@ export default function QuickRunPage() {
     if (!bulkPw.trim()) return;
     setSessions((p) => p.map((s) => s.type === "dashboard" ? { ...s, loginPassword: bulkPw.trim() } : s));
     setBulkPw("");
+  };
+
+  const cleanupSessions = async () => {
+    const withLogin = sessions.filter(s => s.enabled && s.loginEmail && s.loginPassword && s.url);
+    if (!withLogin.length) { setCleanupMsg("로그인 정보가 있는 세션이 없습니다."); return; }
+    setCleaningUp(true); setCleanupMsg(null);
+    const msgs: string[] = [];
+    for (const s of withLogin) {
+      try {
+        const res = await fetch("/api/human-agent/logout", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetUrl: s.url, loginEmail: s.loginEmail, loginPassword: s.loginPassword }),
+        });
+        const d = await res.json();
+        msgs.push(`${s.label}: ${d.message ?? (d.success ? "완료" : "실패")}`);
+      } catch { msgs.push(`${s.label}: 오류 발생`); }
+    }
+    setCleanupMsg(msgs.join("\n")); setCleaningUp(false);
   };
 
   const run = async () => {
@@ -951,6 +971,15 @@ export default function QuickRunPage() {
                 : `▶ 실행 (${active.length}개 세션 × ${selCount}개 시나리오)`}
             </button>
             <p className="text-xs text-gray-400 text-center">세션별 순차 실행 · 스크린샷 자동 저장</p>
+            <div className="border-t pt-2">
+              <button onClick={cleanupSessions} disabled={isRunning || cleaningUp}
+                className="w-full py-2 rounded-lg text-xs font-medium bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {cleaningUp ? "로그아웃 중..." : "세션 정리 (이전 로그아웃)"}
+              </button>
+              {cleanupMsg && (
+                <div className="mt-1.5 p-2 rounded bg-gray-50 border text-xs text-gray-600 whitespace-pre-line">{cleanupMsg}</div>
+              )}
+            </div>
           </div>
         </div>
 

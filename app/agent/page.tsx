@@ -192,6 +192,29 @@ export default function AgentPage() {
   const [genEvents, setGenEvents]       = useState<AgentEvent[]>([]);
   const [genScenarios, setGenScenarios] = useState<QAScenario[] | null>(null);
 
+  // Session cleanup state
+  const [cleaningUp, setCleaningUp] = useState(false);
+  const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
+
+  // ── Session cleanup ────────────────────────────────────────
+  const cleanupSessions = async () => {
+    const withLogin = targets.filter(t => t.enabled && t.loginEmail && t.loginPassword && t.url);
+    if (!withLogin.length) { setCleanupMsg("로그인 정보가 있는 URL이 없습니다."); return; }
+    setCleaningUp(true); setCleanupMsg(null);
+    const msgs: string[] = [];
+    for (const t of withLogin) {
+      try {
+        const res = await fetch("/api/human-agent/logout", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetUrl: t.url, loginEmail: t.loginEmail, loginPassword: t.loginPassword }),
+        });
+        const d = await res.json();
+        msgs.push(`${t.label}: ${d.message ?? (d.success ? "완료" : "실패")}`);
+      } catch { msgs.push(`${t.label}: 오류 발생`); }
+    }
+    setCleanupMsg(msgs.join("\n")); setCleaningUp(false);
+  };
+
   // ── Helpers ────────────────────────────────────────────────
   const addTarget = () =>
     setTargets((p) => [...p, { id: `t${Date.now()}`, label: `URL ${p.length + 1}`, url: "", loginEmail: "", loginPassword: "", enabled: true }]);
@@ -461,6 +484,17 @@ export default function AgentPage() {
             {activeCount > 1 && (
               <p className="text-xs text-gray-400 text-center">시나리오만 생성은 첫 번째 활성 URL 기준</p>
             )}
+
+            {/* Session cleanup */}
+            <div className="border-t pt-2 mt-1">
+              <button onClick={cleanupSessions} disabled={isRunning || isGenerating || cleaningUp}
+                className="w-full py-2 rounded-lg text-xs font-medium bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                {cleaningUp ? "로그아웃 중..." : "세션 정리 (이전 로그아웃)"}
+              </button>
+              {cleanupMsg && (
+                <div className="mt-1.5 p-2 rounded bg-gray-50 border text-xs text-gray-600 whitespace-pre-line">{cleanupMsg}</div>
+              )}
+            </div>
           </div>
         </div>
 
