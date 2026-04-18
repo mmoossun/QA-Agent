@@ -72,7 +72,9 @@ const COL_SYNONYMS: Record<keyof TestCase, string[]> = {
 };
 
 function matchColumn(header: string): keyof TestCase | null {
-  const normalized = header.toLowerCase().replace(/[\s_\-]/g, "");
+  // Strip section prefix like "기본 정보/", "테스트 진행/" → use only the part after the last "/"
+  const stripped = header.includes("/") ? header.split("/").pop()! : header;
+  const normalized = stripped.toLowerCase().replace(/[\s_\-]/g, "");
   if (!normalized) return null;
   for (const [field, synonyms] of Object.entries(COL_SYNONYMS)) {
     if (synonyms.some(s => normalized === s.replace(/[\s_\-]/g, ""))) {
@@ -268,6 +270,11 @@ function buildValueMapper(field: keyof TestCase, sampleValues: string[]): (v: st
   }
 
   if (field === "status") {
+    // TRUE/FALSE boolean format (e.g. 판정 column)
+    const hasBool = sampleValues.some(v => /^(true|false)$/i.test(v));
+    if (hasBool) {
+      return v => v === "Pass" ? "TRUE" : v === "Fail" ? "FALSE" : v === "Not Run" ? "FALSE" : v === "Skip" ? "FALSE" : v;
+    }
     const notRun = sampleValues.find(v => /미실행|대기|not.?run/i.test(v)) ?? "미실행";
     const pass   = sampleValues.find(v => /통과|합격|pass/i.test(v))        ?? "통과";
     const fail   = sampleValues.find(v => /실패|불합격|fail/i.test(v))      ?? "실패";
