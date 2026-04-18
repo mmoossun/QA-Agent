@@ -282,50 +282,40 @@ function buildValueMapper(field: keyof TestCase, sampleValues: string[]): (v: st
   return v => v;
 }
 
-// ── Append test cases (preserves existing data, matches sheet format) ──
+// ── Export to a NEW tab, formatted to match the reference tab ────
 export async function appendTestCases(
   sheetId: string,
   testCases: TestCase[],
-  tabName?: string,
-): Promise<number> {
+  refTabName?: string,  // existing tab to read format from
+): Promise<{ newTabName: string; count: number }> {
   const sheets = getSheetsClient();
 
-  let resolvedTab = tabName;
-  if (!resolvedTab) {
+  // Resolve reference tab
+  let refTab = refTabName;
+  if (!refTab) {
     const tabs = await getSheetTabs(sheetId);
-    resolvedTab = tabs[0]?.title;
+    refTab = tabs[0]?.title ?? "";
   }
 
-  if (!resolvedTab) {
-    resolvedTab = "TestCases";
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests: [{ addSheet: { properties: { title: resolvedTab } } }] },
-    });
-  }
-
-  // Read all rows to detect header + sample data for format matching
+  // ── Read reference tab to get header + value format ───────────
   const allDataRes = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${resolvedTab}!A1:Z`,
+    range: `${refTab}!A1:Z`,
   });
-
   const allRows = allDataRes.data.values ?? [];
+
   let colMap: Array<keyof TestCase | null>;
-  // Per-column value mapper (e.g. "High" → "높음" if sheet uses Korean)
+  let headerRow: string[];
   const valueMappers: Map<number, (v: string) => string> = new Map();
 
+  const DEFAULT_HEADERS = ["번호", "카테고리", "테스트 제목", "테스트 단계", "기대 결과", "우선순위", "상태", "비고"];
+  const DEFAULT_COLMAP: Array<keyof TestCase> = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
+
   if (allRows.length === 0) {
-    const STANDARD_HEADERS = ["번호", "카테고리", "테스트 제목", "테스트 단계", "기대 결과", "우선순위", "상태", "비고"];
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: sheetId,
-      range: `${resolvedTab}!A1`,
-      valueInputOption: "RAW",
-      requestBody: { values: [STANDARD_HEADERS] },
-    });
-    colMap = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
+    headerRow = DEFAULT_HEADERS;
+    colMap = DEFAULT_COLMAP;
   } else {
-    // Auto-detect header row (most column matches in first 10 rows)
+    // Auto-detect header row
     let headerRowIdx = 0;
     let bestMatchCount = 0;
     for (let i = 0; i < Math.min(10, allRows.length); i++) {
@@ -333,24 +323,39 @@ export async function appendTestCases(
       if (matched > bestMatchCount) { bestMatchCount = matched; headerRowIdx = i; }
     }
 
+    headerRow = allRows[headerRowIdx].map(String);
     colMap = bestMatchCount > 0
-      ? buildColumnMap(allRows[headerRowIdx].map(String))
-      : ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
+      ? buildColumnMap(headerRow)
+      : DEFAULT_COLMAP;
 
-    // Collect sample values per column from existing data rows
+    // Build value mappers from existing data samples
     const dataRows = allRows.slice(headerRowIdx + 1).filter(r => r.some(c => String(c ?? "").trim()));
     colMap.forEach((field, colIdx) => {
       if (!field) return;
-      const samples = dataRows
-        .slice(0, 10)
-        .map(row => String(row[colIdx] ?? "").trim())
-        .filter(v => v);
-      const mapper = buildValueMapper(field, samples);
-      valueMappers.set(colIdx, mapper);
+      const samples = dataRows.slice(0, 10).map(r => String(r[colIdx] ?? "").trim()).filter(v => v);
+      valueMappers.set(colIdx, buildValueMapper(field, samples));
     });
   }
 
-  // Build rows aligned to detected column order, applying value format mappers
+  // ── Create new tab with timestamped name ──────────────────────
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const newTabName = `QA ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title: newTabName } } }] },
+  });
+
+  // ── Write header row (copied from reference tab) ──────────────
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `${newTabName}!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: [headerRow] },
+  });
+
+  // ── Build data rows ───────────────────────────────────────────
   const numCols = Math.max(colMap.length, 1);
   const rows = testCases.map(tc => {
     const row = new Array(numCols).fill("");
@@ -363,21 +368,15 @@ export async function appendTestCases(
     return row;
   });
 
-  // Calculate the actual last row by scanning column A — write directly below it
-  const colARes = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `${resolvedTab}!A:A`,
-  });
-  const lastRow = colARes.data.values?.length ?? 0;
-
+  // ── Write data starting at row 2 ─────────────────────────────
   await sheets.spreadsheets.values.update({
     spreadsheetId: sheetId,
-    range: `${resolvedTab}!A${lastRow + 1}`,
+    range: `${newTabName}!A2`,
     valueInputOption: "RAW",
     requestBody: { values: rows },
   });
 
-  return rows.length;
+  return { newTabName, count: rows.length };
 }
 
 // ── Update a single row status ────────────────────────────────

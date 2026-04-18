@@ -286,7 +286,7 @@ export default function HumanAgentPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "내보내기 실패");
-      setExportStatus(`✅ ${data.appended}개 케이스가 "${selectedTab || "첫 번째 탭"}"에 추가됐습니다`);
+      setExportStatus(`✅ ${data.appended}개 케이스 → 새 탭 "${data.newTabName}"에 저장됐습니다`);
     } catch (e) {
       setExportStatus(`❌ ${String(e)}`);
     } finally {

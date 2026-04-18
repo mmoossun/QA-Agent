@@ -77,8 +77,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
     const { sheetId, tab, testCases } = parsed.data;
-    const count = await appendTestCases(sheetId, testCases as TestCase[], tab);
-    return NextResponse.json({ success: true, appended: count });
+    const { newTabName, count } = await appendTestCases(sheetId, testCases as TestCase[], tab);
+    return NextResponse.json({ success: true, appended: count, newTabName });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
