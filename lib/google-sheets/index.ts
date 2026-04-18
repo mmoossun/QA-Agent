@@ -114,6 +114,69 @@ function normalizePriority(val: string): TestCase["priority"] {
   return "Medium";
 }
 
+// ── Sheet analysis ────────────────────────────────────────────
+export interface SheetAnalysis {
+  tabName: string;
+  headers: string[];
+  headerRowIndex: number;
+  columnMapping: Array<{
+    header: string;
+    field: keyof TestCase | null;
+    sampleValues: string[];
+  }>;
+  totalDataRows: number;
+  formatDescription: string;
+}
+
+export async function analyzeSheet(sheetId: string, tabName?: string): Promise<SheetAnalysis> {
+  const sheets = getSheetsClient();
+
+  let resolvedTab = tabName;
+  if (!resolvedTab) {
+    const tabs = await getSheetTabs(sheetId);
+    if (!tabs.length) throw new Error("스프레드시트에 탭이 없습니다");
+    resolvedTab = tabs[0].title;
+  }
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${resolvedTab}!A1:Z`,
+  });
+
+  const allRows = res.data.values ?? [];
+  if (allRows.length === 0) {
+    return { tabName: resolvedTab, headers: [], headerRowIndex: 0, columnMapping: [], totalDataRows: 0, formatDescription: "빈 시트입니다." };
+  }
+
+  // Auto-detect header row (same as readSheet)
+  let headerRowIdx = 0;
+  let bestMatchCount = 0;
+  for (let i = 0; i < Math.min(10, allRows.length); i++) {
+    const matched = buildColumnMap(allRows[i].map(String)).filter(Boolean).length;
+    if (matched > bestMatchCount) { bestMatchCount = matched; headerRowIdx = i; }
+  }
+
+  const headers = allRows[headerRowIdx].map(String);
+  const colMapFields = buildColumnMap(headers);
+  const dataRows = allRows.slice(headerRowIdx + 1).filter(r => r.some(c => String(c ?? "").trim()));
+
+  const columnMapping = headers.map((header, colIdx) => ({
+    header,
+    field: colMapFields[colIdx],
+    sampleValues: dataRows.slice(0, 5).map(row => String(row[colIdx] ?? "").trim()).filter(v => v).slice(0, 3),
+  }));
+
+  const colLines = columnMapping.map((col, i) => {
+    const fieldLabel = col.field ? ` (→ ${col.field})` : "";
+    const samples = col.sampleValues.length > 0 ? ` 예시: ${col.sampleValues.map(v => `"${v}"`).join(", ")}` : "";
+    return `  ${i + 1}. "${col.header}"${fieldLabel}${samples}`;
+  }).join("\n");
+
+  const formatDescription = `탭명: "${resolvedTab}"\n기존 시트 컬럼 (순서대로):\n${colLines}\n총 데이터 행 수: ${dataRows.length}`;
+
+  return { tabName: resolvedTab, headers, headerRowIndex: headerRowIdx, columnMapping, totalDataRows: dataRows.length, formatDescription };
+}
+
 // ── Get raw header row for debugging ─────────────────────────
 export async function getRawHeaders(sheetId: string, tabName?: string): Promise<string[][]> {
   const sheets = getSheetsClient();

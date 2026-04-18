@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import type { HumanStep, HumanAgentResult } from "@/lib/human-agent/runner";
 import type { TestReport } from "@/lib/human-agent/report-generator";
 import { generateReportHTML, triggerDownload, safeFilename } from "@/lib/human-agent/report-export";
-import type { TestCase } from "@/lib/google-sheets";
+import type { TestCase, SheetAnalysis } from "@/lib/google-sheets";
 
 // ─── Types ─────────────────────────────────────────────────────
 interface TargetEntry {
@@ -27,6 +27,28 @@ const CATEGORIES: { id: Category; emoji: string }[] = [
 ];
 
 interface ParsedSheet { rawTable?: string; fileName: string; rowCount: number; }
+
+// Extract column format description from a markdown table string (for uploaded files)
+function extractFileFormat(rawTable: string, fileName: string): string {
+  const lines = rawTable.split("\n");
+  const headerLine = lines[0] ?? "";
+  const headers = headerLine.split("|").map(h => h.trim()).filter(h => h && h !== "---");
+  if (!headers.length) return "";
+  const dataLines = lines.slice(2, 6); // skip header + --- divider
+  const sampleRows = dataLines.map(line =>
+    line.split("|").map(c => c.trim()).filter(c => c)
+  );
+  const colLines = headers.map((h, i) => {
+    const samples = sampleRows
+      .map(row => row[i] ?? "")
+      .filter(v => v)
+      .slice(0, 3)
+      .map(v => `"${v}"`)
+      .join(", ");
+    return `  ${i + 1}. "${h}"${samples ? ` 예시: ${samples}` : ""}`;
+  }).join("\n");
+  return `파일명: "${fileName}"\n컬럼 (순서대로):\n${colLines}`;
+}
 
 interface TargetRun {
   target: TargetEntry;
@@ -128,6 +150,9 @@ export default function HumanAgentPage() {
   const [exporting, setExporting]       = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importing, setImporting]       = useState(false);
+  const [sheetAnalysis, setSheetAnalysis] = useState<SheetAnalysis | null>(null);
+  const [analyzing, setAnalyzing]         = useState(false);
+  const [analyzeStatus, setAnalyzeStatus] = useState<string | null>(null);
 
   // ── Run mode state ────────────────────────────────────────
   const [maxSteps, setMaxSteps]         = useState(20);
@@ -149,16 +174,41 @@ export default function HumanAgentPage() {
   const toggleCategory = (cat: Category) =>
     setCategories(p => { const n = new Set(p); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
 
+  const [fileFormat, setFileFormat] = useState<string | null>(null);
+
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return;
     setFileError(null);
     const res = await parseSheet(file);
-    if (res.error) { setFileError(res.error); setSheet(null); }
-    else setSheet(res);
+    if (res.error) { setFileError(res.error); setSheet(null); setFileFormat(null); }
+    else {
+      setSheet(res);
+      setFileFormat(res.rawTable ? extractFileFormat(res.rawTable, file.name) : null);
+    }
     e.target.value = "";
   };
 
   const primaryUrl = targets.find(t => t.enabled && t.url.trim())?.url ?? "";
+
+  // ── Analyze Google Sheet format ──────────────────────────
+  const analyzeSheetFn = async () => {
+    if (!sheetId.trim() || analyzing) return;
+    setAnalyzing(true);
+    setAnalyzeStatus(null);
+    setSheetAnalysis(null);
+    try {
+      const tabParam = selectedTab ? `&tab=${encodeURIComponent(selectedTab)}` : "";
+      const res = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}&analyze=1${tabParam}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "분석 실패");
+      setSheetAnalysis(data.analysis);
+      setAnalyzeStatus(`✅ ${data.analysis.totalDataRows}행 분석 완료 — ${data.analysis.headers.length}개 컬럼 감지`);
+    } catch (e) {
+      setAnalyzeStatus(`❌ ${String(e)}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   // ── Generate test cases ───────────────────────────────────
   const generate = async () => {
@@ -167,6 +217,7 @@ export default function HumanAgentPage() {
     setGenError(null);
     setTestCases([]);
     try {
+      const activeFormat = sheetAnalysis?.formatDescription ?? fileFormat ?? undefined;
       const res = await fetch("/api/human-agent/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -175,6 +226,7 @@ export default function HumanAgentPage() {
           goal: goal.trim(),
           categories: Array.from(categories),
           sheetRawTable: sheet?.rawTable || undefined,
+          sheetFormat: activeFormat,
           count: caseCount,
         }),
       });
@@ -506,10 +558,42 @@ export default function HumanAgentPage() {
             <select
               className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 bg-white"
               value={selectedTab}
-              onChange={e => setSelectedTab(e.target.value)}
+              onChange={e => { setSelectedTab(e.target.value); setSheetAnalysis(null); setAnalyzeStatus(null); }}
               disabled={busy}>
               {sheetTabs.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
+          </div>
+        )}
+        {sheetId && (
+          <button
+            onClick={analyzeSheetFn}
+            disabled={busy || analyzing}
+            className="mt-1.5 w-full py-1.5 rounded-lg text-xs font-medium border border-purple-200 text-purple-700 hover:bg-purple-50 disabled:opacity-40 transition-colors">
+            {analyzing ? "분석 중..." : "📊 시트 양식 분석"}
+          </button>
+        )}
+        {analyzeStatus && (
+          <p className={`text-xs mt-0.5 ${analyzeStatus.startsWith("✅") ? "text-green-600" : "text-red-500"}`}>
+            {analyzeStatus}
+          </p>
+        )}
+        {sheetAnalysis && sheetAnalysis.columnMapping.length > 0 && (
+          <div className="mt-1.5 p-2 bg-purple-50 border border-purple-100 rounded-lg">
+            <p className="text-xs font-medium text-purple-700 mb-1">감지된 컬럼</p>
+            <div className="flex flex-wrap gap-1">
+              {sheetAnalysis.columnMapping.map((col, i) => (
+                <span key={i} className={`text-xs px-1.5 py-0.5 rounded-full ${col.field ? "bg-purple-100 text-purple-700" : "bg-gray-100 text-gray-500"}`}>
+                  {col.header}
+                </span>
+              ))}
+            </div>
+            <p className="text-xs text-purple-500 mt-1">테스트 케이스 생성 시 이 양식에 맞게 생성됩니다</p>
+          </div>
+        )}
+        {fileFormat && !sheetAnalysis && (
+          <div className="mt-1.5 p-2 bg-blue-50 border border-blue-100 rounded-lg">
+            <p className="text-xs font-medium text-blue-700 mb-0.5">업로드 파일 양식 감지됨</p>
+            <p className="text-xs text-blue-500">생성 시 파일 컬럼 형식에 맞게 생성됩니다</p>
           </div>
         )}
         <p className="text-xs text-gray-400 mt-0.5">생성된 케이스를 시트에 저장하거나 시트에서 불러옵니다</p>

@@ -16,6 +16,7 @@ const RequestSchema = z.object({
   categories: z.array(z.string()).optional(),
   customPrompt: z.string().optional(),
   sheetRawTable: z.string().optional(),
+  sheetFormat: z.string().optional(),
   count: z.number().min(1).max(50).default(10),
 });
 
@@ -41,11 +42,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { targetUrl, goal, categories, customPrompt, sheetRawTable, count } = parsed.data;
+    const { targetUrl, goal, categories, customPrompt, sheetRawTable, sheetFormat, count } = parsed.data;
 
     const categoryLines = (categories ?? [])
       .map((c) => `- ${c}: ${CATEGORY_DESCRIPTIONS[c] ?? c}`)
       .join("\n");
+
+    const sheetFormatSection = sheetFormat
+      ? `\n\nEXISTING SHEET FORMAT — you MUST match this format exactly:\n${sheetFormat}\nUse the exact same terminology, language (Korean/English), and value formats shown in the examples above (e.g. if priority examples are "높음/중간/낮음" use Korean; if "High/Medium/Low" use English).`
+      : "";
 
     const sheetSection = sheetRawTable
       ? `\n\nUploaded test sheet (use as reference for additional context):\n${sheetRawTable}`
@@ -85,6 +90,7 @@ Priorities:
       `Target URL: ${targetUrl}`,
       goalLine,
       categoryLines ? `\nFocus areas:\n${categoryLines}` : "",
+      sheetFormatSection,
       sheetSection,
       customSection,
       `\nGenerate ${count} diverse, specific test cases that cover the most important scenarios.`,

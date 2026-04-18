@@ -16,6 +16,7 @@ import {
   updateTestCaseStatus,
   getSheetTabs,
   getRawHeaders,
+  analyzeSheet,
   type TestCase,
 } from "@/lib/google-sheets";
 
@@ -26,6 +27,7 @@ export async function GET(req: NextRequest) {
   const tab = searchParams.get("tab") ?? undefined;
   const tabsOnly = searchParams.get("tabs") === "1";
   const headersOnly = searchParams.get("headers") === "1";
+  const analyzeOnly = searchParams.get("analyze") === "1";
 
   if (!sheetId) {
     return NextResponse.json({ error: "sheetId is required" }, { status: 400 });
@@ -39,6 +41,10 @@ export async function GET(req: NextRequest) {
     if (headersOnly) {
       const headers = await getRawHeaders(sheetId, tab);
       return NextResponse.json({ headers });
+    }
+    if (analyzeOnly) {
+      const analysis = await analyzeSheet(sheetId, tab);
+      return NextResponse.json({ analysis });
     }
     const testCases = await readSheet(sheetId, tab);
     return NextResponse.json({ testCases });
