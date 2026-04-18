@@ -191,7 +191,7 @@ export async function readSheet(
     });
 }
 
-// ── Append test cases ─────────────────────────────────────────
+// ── Append test cases (preserves existing data, matches sheet format) ──
 export async function appendTestCases(
   sheetId: string,
   testCases: TestCase[],
@@ -207,7 +207,6 @@ export async function appendTestCases(
   }
 
   if (!resolvedTab) {
-    // Create a new tab
     resolvedTab = "TestCases";
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: sheetId,
@@ -215,21 +214,17 @@ export async function appendTestCases(
     });
   }
 
-  // Read existing headers to preserve column order
-  const headerRes = await sheets.spreadsheets.values.get({
+  // Read all rows to auto-detect the header row (same logic as readSheet)
+  const allDataRes = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${resolvedTab}!A1:Z1`,
+    range: `${resolvedTab}!A1:Z`,
   });
 
+  const allRows = allDataRes.data.values ?? [];
   let colMap: Array<keyof TestCase | null>;
-  let writeRange: string;
 
-  if (headerRes.data.values?.length) {
-    // Sheet already has headers — map to existing columns
-    colMap = buildColumnMap(headerRes.data.values[0].map(String));
-    writeRange = `${resolvedTab}!A1`;
-  } else {
-    // Empty sheet — write standard headers first
+  if (allRows.length === 0) {
+    // Completely empty sheet — write standard headers then append
     const STANDARD_HEADERS = ["ID", "Category", "Title", "Steps", "Expected Result", "Priority", "Status", "Notes"];
     await sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
@@ -238,22 +233,38 @@ export async function appendTestCases(
       requestBody: { values: [STANDARD_HEADERS] },
     });
     colMap = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
-    writeRange = `${resolvedTab}!A1`;
+  } else {
+    // Find header row: scan first 10 rows, pick the one with the most column matches
+    let headerRowIdx = 0;
+    let bestMatchCount = 0;
+    for (let i = 0; i < Math.min(10, allRows.length); i++) {
+      const matched = buildColumnMap(allRows[i].map(String)).filter(Boolean).length;
+      if (matched > bestMatchCount) { bestMatchCount = matched; headerRowIdx = i; }
+    }
+
+    if (bestMatchCount > 0) {
+      // Use detected header row's column order
+      colMap = buildColumnMap(allRows[headerRowIdx].map(String));
+    } else {
+      // No recognizable header — default order
+      colMap = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
+    }
   }
 
-  // Build rows aligned to sheet's column order
-  const numCols = colMap.length;
+  // Build rows aligned to the sheet's detected column order
+  const numCols = Math.max(colMap.length, 1);
   const rows = testCases.map(tc => {
     const row = new Array(numCols).fill("");
     colMap.forEach((field, i) => {
-      if (field) row[i] = tc[field] ?? "";
+      if (field) row[i] = String(tc[field] ?? "");
     });
     return row;
   });
 
+  // Append after last row with data — INSERT_ROWS never overwrites existing content
   await sheets.spreadsheets.values.append({
     spreadsheetId: sheetId,
-    range: writeRange,
+    range: `${resolvedTab}!A1`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },

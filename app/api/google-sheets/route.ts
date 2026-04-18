@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
 // ── POST: append new test cases ───────────────────────────────
 const AppendSchema = z.object({
   sheetId: z.string().min(1),
-  tab: z.string().default("TestCases"),
+  tab: z.string().optional(),
   testCases: z.array(z.object({
     id: z.string(),
     category: z.string(),
@@ -97,7 +97,7 @@ export async function PUT(req: NextRequest) {
 // ── PATCH: update status of a single test case ────────────────
 const PatchSchema = z.object({
   sheetId: z.string().min(1),
-  tab: z.string().default("TestCases"),
+  tab: z.string().optional(),
   testCaseId: z.string().min(1),
   status: z.enum(["Not Run", "Pass", "Fail", "Skip"]),
   notes: z.string().default(""),
