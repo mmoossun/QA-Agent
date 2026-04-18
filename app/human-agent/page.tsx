@@ -155,16 +155,18 @@ export default function HumanAgentPage() {
   const [analyzeStatus, setAnalyzeStatus] = useState<string | null>(null);
 
   // ── Run mode state ────────────────────────────────────────
-  const [maxSteps, setMaxSteps]         = useState(20);
-  const [runs, setRuns]                 = useState<TargetRun[]>([]);
-  const [running, setRunning]           = useState(false);
-  const [activeTab, setActiveTab]       = useState<string>("");
-  const [expandedStep, setExpandedStep] = useState<number | null>(null);
-  const [reports, setReports]           = useState<Record<string, TestReport>>({});
-  const [reportView, setReportView]     = useState<"steps" | "report">("steps");
-  const [cleaningUp, setCleaningUp]     = useState(false);
-  const [cleanupMsg, setCleanupMsg]     = useState<string | null>(null);
-  const bottomRef                       = useRef<HTMLDivElement>(null);
+  const [maxSteps, setMaxSteps]           = useState(20);
+  const [runs, setRuns]                   = useState<TargetRun[]>([]);
+  const [running, setRunning]             = useState(false);
+  const [activeTab, setActiveTab]         = useState<string>("");
+  const [expandedStep, setExpandedStep]   = useState<number | null>(null);
+  const [reports, setReports]             = useState<Record<string, TestReport>>({});
+  const [reportView, setReportView]       = useState<"steps" | "report">("steps");
+  const [cleaningUp, setCleaningUp]       = useState(false);
+  const [cleanupMsg, setCleanupMsg]       = useState<string | null>(null);
+  const [runExportStatus, setRunExportStatus] = useState<string | null>(null);
+  const [runExporting, setRunExporting]   = useState(false);
+  const bottomRef                         = useRef<HTMLDivElement>(null);
 
   // ── Helpers ───────────────────────────────────────────────
   const addTarget = () => setTargets(p => [...p, { id: `t${Date.now()}`, label: `URL ${p.length + 1}`, url: "", loginEmail: "", loginPassword: "", enabled: true }]);
@@ -487,9 +489,65 @@ export default function HumanAgentPage() {
     setRunning(false);
   };
 
+  // ── Export run results to Google Sheets ─────────────────
+  const exportRunToSheets = async (run: TargetRun) => {
+    if (!sheetId.trim() || runExporting) return;
+    setRunExporting(true);
+    setRunExportStatus(null);
+    try {
+      // Auto-analyze if not yet done
+      let activeAnalysis = sheetAnalysis;
+      if (!activeAnalysis) {
+        setRunExportStatus("📊 시트 양식 분석 중...");
+        const tabParam = selectedTab ? `&tab=${encodeURIComponent(selectedTab)}` : "";
+        const aRes = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}&analyze=1${tabParam}`);
+        if (aRes.ok) {
+          const aData = await aRes.json();
+          activeAnalysis = aData.analysis ?? null;
+          setSheetAnalysis(activeAnalysis);
+          if (activeAnalysis) {
+            setAnalyzeStatus(`✅ ${activeAnalysis.totalDataRows}행 분석 완료 — ${activeAnalysis.headers.length}개 컬럼 감지`);
+          }
+        }
+      }
+
+      // Convert HumanStep[] → TestCase[] so existing sheet format logic can apply
+      const testCases: TestCase[] = run.steps.map((step) => ({
+        id: `STEP-${String(step.stepNumber).padStart(3, "0")}`,
+        category: step.decision.action,
+        title: step.decision.description,
+        steps: [
+          `액션: ${step.decision.action}`,
+          step.decision.target ? `대상: ${step.decision.target}` : null,
+          step.decision.value  ? `입력값: ${step.decision.value}` : null,
+        ].filter(Boolean).join("\n"),
+        expectedResult: step.decision.observation,
+        priority: "Medium" as const,
+        status: step.success ? "Pass" as const : "Fail" as const,
+        notes: step.error ?? "",
+      }));
+
+      setRunExportStatus("📤 내보내는 중...");
+      const body: Record<string, unknown> = { sheetId: sheetId.trim(), testCases };
+      if (selectedTab) body.tab = selectedTab;
+      const res = await fetch("/api/google-sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "내보내기 실패");
+      setRunExportStatus(`✅ ${run.steps.length}개 스텝 결과 → 새 탭 "${data.newTabName}"에 저장됐습니다`);
+    } catch (e) {
+      setRunExportStatus(`❌ ${String(e)}`);
+    } finally {
+      setRunExporting(false);
+    }
+  };
+
   const activeRun = runs.find(r => r.target.id === activeTab);
   const enabledCount = targets.filter(t => t.enabled && t.url.trim()).length;
-  const busy = generating || running || exporting || importing;
+  const busy = generating || running || exporting || importing || runExporting;
 
   // ── Shared left panel settings ────────────────────────────
   const sharedSettings = (
@@ -708,6 +766,23 @@ export default function HumanAgentPage() {
                   {running ? "실행 중..." : "▶ 테스트 시작"}
                 </button>
 
+                {/* Export run results to Google Sheets */}
+                {sheetId && activeRun?.result && !running && (
+                  <div className="space-y-1">
+                    <button
+                      onClick={() => exportRunToSheets(activeRun)}
+                      disabled={busy}
+                      className="w-full py-2 rounded-lg text-xs font-medium border border-teal-300 text-teal-700 hover:bg-teal-50 disabled:opacity-40 transition-colors">
+                      {runExporting ? "내보내는 중..." : "📤 테스트 결과 시트에 내보내기"}
+                    </button>
+                    {runExportStatus && (
+                      <p className={`text-xs ${runExportStatus.startsWith("✅") ? "text-green-600" : runExportStatus.startsWith("📊") || runExportStatus.startsWith("📤") ? "text-blue-500" : "text-red-500"}`}>
+                        {runExportStatus}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {/* Session cleanup */}
                 <div className="border-t pt-3 mt-1">
                   <button
@@ -861,7 +936,13 @@ export default function HumanAgentPage() {
                     </div>
                   )}
                   {activeRun.result && !running && (
-                    <RunResultOverview run={activeRun} onRerun={() => { setRuns([]); setReports({}); startRun(); }} />
+                    <RunResultOverview
+                      run={activeRun}
+                      onRerun={() => { setRuns([]); setReports({}); startRun(); }}
+                      onExportToSheets={sheetId ? () => exportRunToSheets(activeRun) : undefined}
+                      exportStatus={runExportStatus}
+                      exporting={runExporting}
+                    />
                   )}
                 </>
               )}
@@ -1004,7 +1085,13 @@ function TargetCard({ target, onChange, onRemove, disabled }: {
 }
 
 // ─── Run Result Overview ────────────────────────────────────────
-function RunResultOverview({ run, onRerun }: { run: TargetRun; onRerun: () => void }) {
+function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, exporting }: {
+  run: TargetRun;
+  onRerun: () => void;
+  onExportToSheets?: () => void;
+  exportStatus?: string | null;
+  exporting?: boolean;
+}) {
   const { result, steps, target } = run;
   if (!result) return null;
 
@@ -1074,6 +1161,28 @@ function RunResultOverview({ run, onRerun }: { run: TargetRun; onRerun: () => vo
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Export to Google Sheets */}
+      {onExportToSheets && (
+        <div className="px-6 pb-4">
+          <button
+            onClick={onExportToSheets}
+            disabled={exporting}
+            className={`w-full py-2.5 rounded-lg text-sm font-semibold transition-colors border-2 border-teal-300 text-teal-700 hover:bg-teal-50 disabled:opacity-40 ${exporting ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            {exporting ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
+                내보내는 중...
+              </span>
+            ) : "📤 테스트 결과 Google 시트에 내보내기"}
+          </button>
+          {exportStatus && (
+            <p className={`text-xs mt-1.5 text-center ${exportStatus.startsWith("✅") ? "text-green-600" : exportStatus.startsWith("📊") || exportStatus.startsWith("📤") ? "text-blue-500" : "text-red-500"}`}>
+              {exportStatus}
+            </p>
+          )}
         </div>
       )}
 
