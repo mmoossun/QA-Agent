@@ -254,6 +254,34 @@ export async function readSheet(
     });
 }
 
+// ── Value format mapper: converts internal English values to sheet's actual format ──
+function buildValueMapper(field: keyof TestCase, sampleValues: string[]): (v: string) => string {
+  if (field !== "priority" && field !== "status") return v => v;
+  const hasKorean = sampleValues.some(v => /[가-힣]/.test(v));
+  if (!hasKorean) return v => v;
+
+  if (field === "priority") {
+    const hi  = sampleValues.find(v => /높|상|high/i.test(v))            ?? "높음";
+    const mid = sampleValues.find(v => /중|보통|medium|미디엄/i.test(v)) ?? "중간";
+    const lo  = sampleValues.find(v => /낮|하|low/i.test(v))             ?? "낮음";
+    return v => v === "High" ? hi : v === "Medium" ? mid : v === "Low" ? lo : v;
+  }
+
+  if (field === "status") {
+    const notRun = sampleValues.find(v => /미실행|대기|not.?run/i.test(v)) ?? "미실행";
+    const pass   = sampleValues.find(v => /통과|합격|pass/i.test(v))        ?? "통과";
+    const fail   = sampleValues.find(v => /실패|불합격|fail/i.test(v))      ?? "실패";
+    const skip   = sampleValues.find(v => /스킵|제외|skip/i.test(v))        ?? "스킵";
+    return v =>
+      v === "Not Run" ? notRun :
+      v === "Pass"    ? pass   :
+      v === "Fail"    ? fail   :
+      v === "Skip"    ? skip   : v;
+  }
+
+  return v => v;
+}
+
 // ── Append test cases (preserves existing data, matches sheet format) ──
 export async function appendTestCases(
   sheetId: string,
@@ -262,7 +290,6 @@ export async function appendTestCases(
 ): Promise<number> {
   const sheets = getSheetsClient();
 
-  // Auto-select first tab if not specified
   let resolvedTab = tabName;
   if (!resolvedTab) {
     const tabs = await getSheetTabs(sheetId);
@@ -277,7 +304,7 @@ export async function appendTestCases(
     });
   }
 
-  // Read all rows to auto-detect the header row (same logic as readSheet)
+  // Read all rows to detect header + sample data for format matching
   const allDataRes = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
     range: `${resolvedTab}!A1:Z`,
@@ -285,10 +312,11 @@ export async function appendTestCases(
 
   const allRows = allDataRes.data.values ?? [];
   let colMap: Array<keyof TestCase | null>;
+  // Per-column value mapper (e.g. "High" → "높음" if sheet uses Korean)
+  const valueMappers: Map<number, (v: string) => string> = new Map();
 
   if (allRows.length === 0) {
-    // Completely empty sheet — write standard headers then append
-    const STANDARD_HEADERS = ["ID", "Category", "Title", "Steps", "Expected Result", "Priority", "Status", "Notes"];
+    const STANDARD_HEADERS = ["번호", "카테고리", "테스트 제목", "테스트 단계", "기대 결과", "우선순위", "상태", "비고"];
     await sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
       range: `${resolvedTab}!A1`,
@@ -297,7 +325,7 @@ export async function appendTestCases(
     });
     colMap = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
   } else {
-    // Find header row: scan first 10 rows, pick the one with the most column matches
+    // Auto-detect header row (most column matches in first 10 rows)
     let headerRowIdx = 0;
     let bestMatchCount = 0;
     for (let i = 0; i < Math.min(10, allRows.length); i++) {
@@ -305,31 +333,47 @@ export async function appendTestCases(
       if (matched > bestMatchCount) { bestMatchCount = matched; headerRowIdx = i; }
     }
 
-    if (bestMatchCount > 0) {
-      // Use detected header row's column order
-      colMap = buildColumnMap(allRows[headerRowIdx].map(String));
-    } else {
-      // No recognizable header — default order
-      colMap = ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
-    }
+    colMap = bestMatchCount > 0
+      ? buildColumnMap(allRows[headerRowIdx].map(String))
+      : ["id", "category", "title", "steps", "expectedResult", "priority", "status", "notes"];
+
+    // Collect sample values per column from existing data rows
+    const dataRows = allRows.slice(headerRowIdx + 1).filter(r => r.some(c => String(c ?? "").trim()));
+    colMap.forEach((field, colIdx) => {
+      if (!field) return;
+      const samples = dataRows
+        .slice(0, 10)
+        .map(row => String(row[colIdx] ?? "").trim())
+        .filter(v => v);
+      const mapper = buildValueMapper(field, samples);
+      valueMappers.set(colIdx, mapper);
+    });
   }
 
-  // Build rows aligned to the sheet's detected column order
+  // Build rows aligned to detected column order, applying value format mappers
   const numCols = Math.max(colMap.length, 1);
   const rows = testCases.map(tc => {
     const row = new Array(numCols).fill("");
     colMap.forEach((field, i) => {
-      if (field) row[i] = String(tc[field] ?? "");
+      if (!field) return;
+      const raw = String(tc[field] ?? "");
+      const mapper = valueMappers.get(i);
+      row[i] = mapper ? mapper(raw) : raw;
     });
     return row;
   });
 
-  // Append after last row with data — INSERT_ROWS never overwrites existing content
-  await sheets.spreadsheets.values.append({
+  // Calculate the actual last row by scanning column A — write directly below it
+  const colARes = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${resolvedTab}!A1`,
+    range: `${resolvedTab}!A:A`,
+  });
+  const lastRow = colARes.data.values?.length ?? 0;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `${resolvedTab}!A${lastRow + 1}`,
     valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },
   });
 

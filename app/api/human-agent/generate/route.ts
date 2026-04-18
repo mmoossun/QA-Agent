@@ -63,24 +63,28 @@ export async function POST(req: NextRequest) {
     const systemPrompt = `You are a senior QA engineer writing test cases for a web application.
 Generate exactly ${count} test cases as a JSON array. Each test case must be thorough and actionable.
 
+LANGUAGE RULE: Write all content fields (category, title, steps, expectedResult, notes) in Korean.
+Only keep these values in English as-is: id (TC-001 format), priority (High/Medium/Low), status (Not Run).
+If a sheet format is provided below, match its exact column value format — including language and terminology.
+
 Return ONLY a raw JSON array (no markdown, no explanation):
 [
   {
     "id": "TC-001",
-    "category": "category name",
-    "title": "short descriptive title",
-    "steps": "1. Step one\\n2. Step two\\n3. Step three",
-    "expectedResult": "what should happen if the feature works correctly",
+    "category": "카테고리명",
+    "title": "짧고 명확한 제목",
+    "steps": "1. 첫 번째 단계\\n2. 두 번째 단계\\n3. 세 번째 단계",
+    "expectedResult": "기능이 정상 동작할 때 나타나는 결과",
     "priority": "High" | "Medium" | "Low",
     "status": "Not Run",
     "notes": ""
   }
 ]
 
-Priorities:
-- High: critical user flows, auth, data integrity
-- Medium: important features, common paths
-- Low: edge cases, cosmetic issues`;
+우선순위 기준:
+- High: 핵심 사용자 흐름, 인증, 데이터 무결성
+- Medium: 주요 기능, 일반적인 경로
+- Low: 엣지 케이스, UI 이슈`;
 
     const goalLine = goal.trim()
       ? `Testing goal: ${goal}`
