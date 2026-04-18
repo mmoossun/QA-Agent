@@ -254,12 +254,29 @@ export default function HumanAgentPage() {
     finally { setLoadingTabs(false); }
   };
 
-  // ── Export to Google Sheets ───────────────────────────────
+  // ── Export to Google Sheets (auto-analyzes format if not done yet) ──
   const exportToSheets = async () => {
     if (!sheetId.trim() || testCases.length === 0 || exporting) return;
     setExporting(true);
     setExportStatus(null);
     try {
+      // Auto-analyze if not yet done
+      let activeAnalysis = sheetAnalysis;
+      if (!activeAnalysis) {
+        setExportStatus("📊 시트 양식 분석 중...");
+        const tabParam = selectedTab ? `&tab=${encodeURIComponent(selectedTab)}` : "";
+        const aRes = await fetch(`/api/google-sheets?sheetId=${encodeURIComponent(sheetId.trim())}&analyze=1${tabParam}`);
+        if (aRes.ok) {
+          const aData = await aRes.json();
+          activeAnalysis = aData.analysis ?? null;
+          setSheetAnalysis(activeAnalysis);
+          if (activeAnalysis) {
+            setAnalyzeStatus(`✅ ${activeAnalysis.totalDataRows}행 분석 완료 — ${activeAnalysis.headers.length}개 컬럼 감지`);
+          }
+        }
+      }
+
+      setExportStatus("📤 내보내는 중...");
       const body: Record<string, unknown> = { sheetId: sheetId.trim(), testCases };
       if (selectedTab) body.tab = selectedTab;
       const res = await fetch("/api/google-sheets", {
