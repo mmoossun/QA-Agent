@@ -766,6 +766,27 @@ export default function HumanAgentPage() {
                   {running ? "실행 중..." : "▶ 테스트 시작"}
                 </button>
 
+                {/* Import from sheet + run with cases */}
+                {sheetId && (
+                  <div className="space-y-1 border-t pt-2">
+                    <button onClick={importFromSheets} disabled={busy}
+                      className="w-full py-2 rounded-lg text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 transition-colors">
+                      {importing ? "불러오는 중..." : "📥 시트에서 케이스 불러오기"}
+                    </button>
+                    {importStatus && (
+                      <p className={`text-xs ${importStatus.startsWith("✅") ? "text-green-600" : "text-red-500"}`}>
+                        {importStatus}
+                      </p>
+                    )}
+                    {testCases.length > 0 && (
+                      <button onClick={runFromCases} disabled={busy || enabledCount === 0}
+                        className="w-full py-2 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40 transition-colors">
+                        {running ? "실행 중..." : `▶ 불러온 ${testCases.length}개 케이스로 실행`}
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 {/* Export run results to Google Sheets */}
                 {sheetId && activeRun?.result && !running && (
                   <div className="space-y-1">
