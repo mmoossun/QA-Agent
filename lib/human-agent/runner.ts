@@ -1199,8 +1199,9 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
     }
 
     // Strategy 2: CDP click by backendDOMNodeId — direct DOM hit, bypasses text matching
-    // Prioritized for unnamed elements; also runs here as reliable early fallback for named ones
-    if (ref?.backendDOMNodeId && !ref.name) {
+    // Primary path for unnamed elements; early reliable fallback for named ones.
+    // Strategy 3 text-search still runs after if this fails.
+    if (ref?.backendDOMNodeId) {
       try {
         const targetFrame = ref.frameIndex ? this.frames[ref.frameIndex] : p;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1218,9 +1219,20 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
             await client.detach();
             return true;
           }
+          // Coordinate click fallback (main frame only)
+          if (!ref.frameIndex) {
+            const { model } = await client.send("DOM.getBoxModel", { nodeId: nodeIds[0] }) as { model: { content: number[] } };
+            const c = model.content;
+            const cx = (c[0] + c[4]) / 2;
+            const cy = (c[1] + c[5]) / 2;
+            await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1 });
+            await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1 });
+            await client.detach();
+            return true;
+          }
         }
         await client.detach();
-      } catch { /* fall through */ }
+      } catch { /* fall through to text-based strategies */ }
     }
 
     // Strategy 3: getByText — only use ref.name (not the long description hint)
@@ -1242,43 +1254,6 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
           }
         } catch { /* try next */ }
       }
-    }
-
-    // Strategy 4: CDP DOM click using backendDOMNodeId (named elements fallback)
-    // For iframe elements use the child frame's CDP session to avoid coordinate offset issues
-    if (ref?.backendDOMNodeId) {
-      try {
-        const targetFrame = ref.frameIndex ? this.frames[ref.frameIndex] : p;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const client = await p.context().newCDPSession(targetFrame as any);
-        const { nodeIds } = await client.send("DOM.pushNodesByBackendIdsToFrontend", {
-          backendNodeIds: [ref.backendDOMNodeId],
-        }) as { nodeIds: number[] };
-        if (nodeIds[0]) {
-          // Use JS dispatchEvent — works in both main frame and iframes without coordinate math
-          const resolved = await client.send("DOM.resolveNode", { nodeId: nodeIds[0] }) as { object: { objectId?: string } };
-          if (resolved.object?.objectId) {
-            await client.send("Runtime.callFunctionOn", {
-              objectId: resolved.object.objectId,
-              functionDeclaration: "function() { this.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); }",
-            });
-            await client.detach();
-            return true;
-          }
-          // Fallback: coordinate click (main frame only — no iframe offset adjustment needed)
-          if (!ref.frameIndex) {
-            const { model } = await client.send("DOM.getBoxModel", { nodeId: nodeIds[0] }) as { model: { content: number[] } };
-            const c = model.content;
-            const cx = (c[0] + c[4]) / 2;
-            const cy = (c[1] + c[5]) / 2;
-            await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1 });
-            await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1 });
-          }
-          await client.detach();
-          return true;
-        }
-        await client.detach();
-      } catch { /* ignore CDP fallback errors */ }
     }
 
     // Strategy 3b: Shadow DOM pierce (web components / custom elements)
