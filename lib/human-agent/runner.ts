@@ -1194,9 +1194,34 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       }
     }
 
-    // Strategy 2: getByText (for elements with visible text)
-    const hintText = ref?.name || hint;
-    if (hintText && hintText.length > 0 && hintText.length < 100) {
+    // Strategy 2: CDP click by backendDOMNodeId (prioritize when name is empty)
+    // Run this BEFORE text search to handle unnamed buttons (close ×, icon buttons, etc.)
+    if (ref?.backendDOMNodeId && !ref.name) {
+      try {
+        const targetFrame = ref.frameIndex ? this.frames[ref.frameIndex] : p;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const client = await p.context().newCDPSession(targetFrame as any);
+        const { nodeIds } = await client.send("DOM.pushNodesByBackendIdsToFrontend", {
+          backendNodeIds: [ref.backendDOMNodeId],
+        }) as { nodeIds: number[] };
+        if (nodeIds[0]) {
+          const resolved = await client.send("DOM.resolveNode", { nodeId: nodeIds[0] }) as { object: { objectId?: string } };
+          if (resolved.object?.objectId) {
+            await client.send("Runtime.callFunctionOn", {
+              objectId: resolved.object.objectId,
+              functionDeclaration: "function() { this.scrollIntoView(); this.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); }",
+            });
+            await client.detach();
+            return true;
+          }
+        }
+        await client.detach();
+      } catch { /* fall through */ }
+    }
+
+    // Strategy 3: getByText — only use ref.name (not the long description hint)
+    const hintText = ref?.name;  // never use description as text-search hint
+    if (hintText && hintText.length > 0 && hintText.length < 80) {
       for (const attempt of [
         () => p.getByRole("button", { name: hintText, exact: false }),
         () => p.getByRole("link", { name: hintText, exact: false }),
@@ -1215,7 +1240,7 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       }
     }
 
-    // Strategy 3: CDP DOM click using backendDOMNodeId
+    // Strategy 4: CDP DOM click using backendDOMNodeId (named elements fallback)
     // For iframe elements use the child frame's CDP session to avoid coordinate offset issues
     if (ref?.backendDOMNodeId) {
       try {
