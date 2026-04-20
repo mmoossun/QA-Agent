@@ -114,6 +114,7 @@ interface A11yRef {
   expanded?: boolean;
   backendDOMNodeId?: number;  // stored for CDP fallback
   frameIndex?: number;        // undefined/0 = main frame; 1+ = child iframe index
+  roleIndex?: number;         // 0-based index within same role group (for index-based fallback)
 }
 
 interface ValidationResult {
@@ -837,6 +838,7 @@ export class HumanAgentRunner {
       await client.detach();
 
       // Build refs
+      const roleCounters: Record<string, number> = {};
       for (const node of nodes) {
         if (node.ignored) continue;
         const role = node.role?.value?.toLowerCase() ?? "";
@@ -857,6 +859,9 @@ export class HumanAgentRunner {
         const checked = node.properties?.find(p => p.name === "checked")?.value?.value;
         const expanded = node.properties?.find(p => p.name === "expanded")?.value?.value;
 
+        const roleIndex = roleCounters[role] ?? 0;
+        roleCounters[role] = roleIndex + 1;
+
         const ref: A11yRef = {
           ref: `@e${counter++}`,
           role,
@@ -867,6 +872,7 @@ export class HumanAgentRunner {
           checked: typeof checked === "boolean" ? checked : undefined,
           expanded: typeof expanded === "boolean" ? expanded : undefined,
           backendDOMNodeId: node.backendDOMNodeId,
+          roleIndex,
         };
         refs.push(ref);
         this.refMap.set(ref.ref, ref);
@@ -1350,8 +1356,62 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       }
     }
 
-    // Strategy 5: Stale-ref recovery — DOM may have changed after the A11y snapshot
-    // Re-snapshot and look for a close/dialog button by known patterns
+    // Strategy 5a: Escape key — universal modal/dialog closer
+    // More reliable than finding a specific close button
+    {
+      const isCloseIntent = hint.toLowerCase().includes("close") ||
+        hint.toLowerCase().includes("닫") || hint.toLowerCase().includes("dismiss") ||
+        hint.toLowerCase().includes("modal") || hint.toLowerCase().includes("cancel");
+      if (isCloseIntent || (!ref?.name && ref?.role === "button")) {
+        try {
+          const hasDialog = await p.locator('[role="dialog"],[role="alertdialog"]').filter({ visible: true }).count() > 0;
+          if (hasDialog) {
+            await p.keyboard.press("Escape");
+            await p.waitForTimeout(300);
+            // Verify dialog closed
+            const stillOpen = await p.locator('[role="dialog"],[role="alertdialog"]').filter({ visible: true }).count() > 0;
+            if (!stillOpen) return true;
+          }
+        } catch { /* fall through */ }
+      }
+    }
+
+    // Strategy 5b: Index-based role lookup — handles re-renders where backendDOMNodeId changes
+    // Find the Nth element of the same role in the current DOM (same position = likely same element)
+    if (ref?.roleIndex !== undefined && ref.role) {
+      try {
+        const roleSelMap: Record<string, string> = {
+          button: "button, [role='button']",
+          link: "a, [role='link']",
+          tab: "[role='tab']",
+          menuitem: "[role='menuitem']",
+          checkbox: "input[type='checkbox'], [role='checkbox']",
+          radio: "input[type='radio'], [role='radio']",
+          combobox: "select, [role='combobox']",
+          textbox: "input[type='text'], input[type='email'], input[type='search'], textarea, [role='textbox']",
+        };
+        const sel = roleSelMap[ref.role];
+        if (sel) {
+          const candidates = p.locator(sel).filter({ visible: true });
+          const count = await candidates.count();
+          if (ref.roleIndex < count) {
+            const target = candidates.nth(ref.roleIndex);
+            // Verify name roughly matches if we have one (avoid clicking wrong element)
+            if (ref.name) {
+              const text = (await target.textContent().catch(() => "")) ?? "";
+              const label = (await target.getAttribute("aria-label").catch(() => "")) ?? "";
+              const nameMatch = text.includes(ref.name.slice(0, 8)) || label.includes(ref.name.slice(0, 8));
+              if (!nameMatch) throw new Error("name mismatch — skip index fallback");
+            }
+            await target.scrollIntoViewIfNeeded();
+            await target.click({ timeout: 5_000 });
+            return true;
+          }
+        }
+      } catch { /* fall through */ }
+    }
+
+    // Strategy 6: Stale-ref deep recovery — re-snapshot + name match + dialog button selectors
     if (ref) {
       try {
         await p.waitForTimeout(300);
