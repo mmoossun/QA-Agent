@@ -378,7 +378,10 @@ export class HumanAgentRunner {
           this.lastFailureContext = null;
         }
       } else if (!success) {
-        this.lastFailureContext = `Execution error: ${error}`;
+        const staleHint = error?.includes("요소를 찾지 못했습니다") || error?.includes("not found")
+          ? " A11y refs가 자동 갱신됨 — 다음 스텝의 새 @eN 값을 사용하세요."
+          : "";
+        this.lastFailureContext = `Execution error: ${error}${staleHint}`;
       } else {
         this.lastFailureContext = null;
       }
@@ -1180,11 +1183,12 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
   private async _resolveAndClick(p: Page, target: string, hint: string): Promise<boolean> {
     const ref = target.startsWith("@e") ? this.refMap.get(target) : undefined;
 
-    // Strategy 1: A11y getByRole (most reliable when name is known)
+    // Strategy 1: A11y getByRole — visible elements only
     if (ref?.name) {
       for (const role of [ref.role, "button", "link", "menuitem"] as const) {
         try {
-          const loc = p.getByRole(role as Parameters<typeof p.getByRole>[0], { name: ref.name, exact: false });
+          const loc = p.getByRole(role as Parameters<typeof p.getByRole>[0], { name: ref.name, exact: false })
+            .filter({ visible: true });
           if (await loc.count() > 0) {
             await loc.first().scrollIntoViewIfNeeded();
             await loc.first().click({ timeout: 6_000 });
@@ -1194,8 +1198,8 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
       }
     }
 
-    // Strategy 2: CDP click by backendDOMNodeId (prioritize when name is empty)
-    // Run this BEFORE text search to handle unnamed buttons (close ×, icon buttons, etc.)
+    // Strategy 2: CDP click by backendDOMNodeId — direct DOM hit, bypasses text matching
+    // Prioritized for unnamed elements; also runs here as reliable early fallback for named ones
     if (ref?.backendDOMNodeId && !ref.name) {
       try {
         const targetFrame = ref.frameIndex ? this.frames[ref.frameIndex] : p;
@@ -1279,7 +1283,8 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
 
     // Strategy 3b: Shadow DOM pierce (web components / custom elements)
     {
-      const searchText = (ref?.name || hint).slice(0, 60);
+      const shortHint = hint.length < 50 ? hint : "";
+      const searchText = (ref?.name || shortHint).slice(0, 60);
       if (searchText) {
         try {
           const elHandle = await p.evaluateHandle((text: string) => {
@@ -1306,7 +1311,7 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
 
     // Strategy 4: child frame fallback (for elements inside iframes)
     {
-      const name = ref?.name || hint;
+      const name = ref?.name || (hint.length < 50 ? hint : "");
       const targetFrames = ref?.frameIndex
         ? [this.frames[ref.frameIndex]].filter(Boolean)
         : this.frames.slice(1);
@@ -1368,6 +1373,65 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
           }
         } catch { /* ignore */ }
       }
+    }
+
+    // Strategy 5: Stale-ref recovery — DOM may have changed after the A11y snapshot
+    // Re-snapshot and look for a close/dialog button by known patterns
+    if (ref) {
+      try {
+        await p.waitForTimeout(300);
+        this.a11yCache = null; // force fresh snapshot
+        // If we were trying to click a close/dismiss button, look for it directly
+        const isCloseAttempt = hint.toLowerCase().includes("close") ||
+          hint.toLowerCase().includes("닫") || hint.toLowerCase().includes("dismiss") ||
+          hint.toLowerCase().includes("modal") || (!ref.name && ref.role === "button");
+        if (isCloseAttempt) {
+          for (const sel of [
+            '[role="dialog"] button[aria-label*="닫"]',
+            '[role="dialog"] button[aria-label*="close" i]',
+            '[role="dialog"] button[aria-label*="Close"]',
+            '[role="alertdialog"] button',
+            '[role="dialog"] button:last-child',
+            '.modal button[class*="close"]',
+            'button[class*="close"]:visible',
+          ]) {
+            try {
+              const loc = p.locator(sel).filter({ visible: true });
+              if (await loc.count() > 0) {
+                await loc.first().click({ timeout: 3_000 });
+                return true;
+              }
+            } catch { /* try next */ }
+          }
+        }
+        // For named elements: re-snapshot and find by same role + name
+        if (ref.name) {
+          const freshRefs = await this._snapshotA11y(true);
+          const candidate = freshRefs.find(r => r.role === ref!.role && r.name === ref!.name);
+          if (candidate?.backendDOMNodeId) {
+            const targetFrame = candidate.frameIndex ? this.frames[candidate.frameIndex] : p;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const client = await p.context().newCDPSession(targetFrame as any);
+            try {
+              const { nodeIds } = await client.send("DOM.pushNodesByBackendIdsToFrontend", {
+                backendNodeIds: [candidate.backendDOMNodeId],
+              }) as { nodeIds: number[] };
+              if (nodeIds[0]) {
+                const resolved = await client.send("DOM.resolveNode", { nodeId: nodeIds[0] }) as { object: { objectId?: string } };
+                if (resolved.object?.objectId) {
+                  await client.send("Runtime.callFunctionOn", {
+                    objectId: resolved.object.objectId,
+                    functionDeclaration: "function() { this.scrollIntoView(); this.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); }",
+                  });
+                  await client.detach();
+                  return true;
+                }
+              }
+              await client.detach();
+            } catch { await client.detach(); }
+          }
+        }
+      } catch { /* ignore recovery errors */ }
     }
 
     return false;
@@ -1580,7 +1644,7 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
 
   private async _resolveAndHover(p: Page, target: string, hint: string): Promise<boolean> {
     const ref = target.startsWith("@e") ? this.refMap.get(target) : undefined;
-    const hintText = ref?.name || hint;
+    const hintText = ref?.name || (hint.length < 50 ? hint : "");
 
     if (hintText) {
       for (const attempt of [
