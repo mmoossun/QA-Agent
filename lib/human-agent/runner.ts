@@ -279,9 +279,24 @@ export class HumanAgentRunner {
   ): Promise<{ status: "done" | "fail" | "max_steps"; summary: string }> {
     let status: "done" | "fail" | "max_steps" = "max_steps";
     let summary = "";
+    let stepsSinceCheckpoint = 0;
+    // Per-case step budget: after this many steps without a new check_case, force "move on" nudge
+    const perCaseBudget = Math.max(10, Math.floor(maxSteps / Math.max((this.config.testCases?.length ?? 1), 1)));
 
     for (let step = 1; step <= maxSteps; step++) {
       const stepStart = Date.now();
+
+      // ── Per-case budget exceeded → force move-on nudge ───────
+      if (this.config.testCases && this.config.testCases.length > 0 && stepsSinceCheckpoint >= perCaseBudget) {
+        const unchecked = this.config.testCases.filter(tc => !this.checkedCases.has(tc.id));
+        if (unchecked.length > 0) {
+          this.lastFailureContext =
+            `🚨 현재 케이스에 ${stepsSinceCheckpoint}스텝을 사용했습니다 (예산: ${perCaseBudget}스텝). ` +
+            `완료 불가능하거나 API키/권한이 없는 경우 check_case(value=fail)로 즉시 처리하고 다음 케이스로 넘어가세요. ` +
+            `미완료: ${unchecked.map(tc => `[${tc.id}] ${tc.title}`).join(", ")}`;
+          logger.warn(`[budget] ${stepsSinceCheckpoint} steps since last checkpoint — nudging agent to move on`);
+        }
+      }
 
       // ── Stall guard ──────────────────────────────────────────
       if (this._isStalled()) {
@@ -403,9 +418,12 @@ export class HumanAgentRunner {
 
       // Checkpoint: check_case actions don't break the loop
       if (decision.action === "check_case") {
+        stepsSinceCheckpoint = 0;  // reset budget counter on each case completion
         await this.page!.waitForTimeout(300);
         continue;
       }
+
+      stepsSinceCheckpoint++;
 
       if (decision.action === "done" || decision.action === "fail") {
         // If we have test cases and some are unchecked, override and continue
