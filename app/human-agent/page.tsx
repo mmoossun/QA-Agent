@@ -461,7 +461,7 @@ export default function HumanAgentPage() {
     setRunning(false);
   };
 
-  // ── Run agent using test cases (sequential, one case at a time) ─
+  // ── Run agent using test cases (checkpoint-based single session) ─
   const runFromCases = async () => {
     const active = targets.filter(t => t.enabled && t.url.trim());
     if (!active.length || testCases.length === 0 || running) return;
@@ -480,11 +480,12 @@ export default function HumanAgentPage() {
     setRuns(initial);
     setActiveTab(active[0].id);
 
-    // Each target runs sequentially; for multi-target just first for now
     for (let i = 0; i < active.length; i++) {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
       try {
+        // maxSteps scales with case count: each case gets ~15 steps budget
+        const totalSteps = Math.min(testCases.length * 15, 150);
         const res = await fetch("/api/human-agent/run-cases", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -493,7 +494,7 @@ export default function HumanAgentPage() {
             testCases: testCases.map(tc => ({ id: tc.id, title: tc.title, steps: tc.steps, expectedResult: tc.expectedResult })),
             loginEmail: target.loginEmail || undefined,
             loginPassword: target.loginPassword || undefined,
-            maxStepsPerCase: Math.min(Math.max(maxSteps, 5), 20),
+            maxSteps: totalSteps,
             categories: Array.from(categories),
           }),
         });
@@ -501,6 +502,9 @@ export default function HumanAgentPage() {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
+        // track step count per case checkpoint
+        const caseStepCount: Record<string, number> = {};
+        let lastStepCount = 0;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -510,23 +514,21 @@ export default function HumanAgentPage() {
             if (!line.startsWith("data: ")) continue;
             try {
               const evt = JSON.parse(line.slice(6));
-              if (evt.type === "case_start") {
-                setRuns(p => p.map((r, idx) => idx === i ? {
-                  ...r,
-                  currentCaseIndex: evt.caseIndex,
-                  cases: r.cases?.map((c, ci) => ci === evt.caseIndex ? { ...c, status: "running" as const } : c),
-                } : r));
-              } else if (evt.type === "step") {
+              if (evt.type === "step") {
+                lastStepCount++;
                 setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
-              } else if (evt.type === "case_complete") {
+              } else if (evt.type === "case_checkpoint") {
+                // Agent just checked off a case
+                const stepsForCase = lastStepCount - (caseStepCount.__prev__ ?? 0);
+                caseStepCount[evt.caseId] = stepsForCase;
+                caseStepCount.__prev__ = lastStepCount;
                 setRuns(p => p.map((r, idx) => idx === i ? {
                   ...r,
-                  cases: r.cases?.map((c, ci) => ci === evt.caseIndex ? {
+                  cases: r.cases?.map(c => c.caseId === evt.caseId ? {
                     ...c,
                     status: evt.status as CaseProgress["status"],
-                    stepCount: evt.stepCount,
-                    summary: evt.summary,
-                    durationMs: evt.durationMs,
+                    summary: evt.description,
+                    stepCount: stepsForCase,
                   } : c),
                 } : r));
               } else if (evt.type === "complete") {

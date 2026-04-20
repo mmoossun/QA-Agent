@@ -39,7 +39,7 @@ fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 // ─── Types ────────────────────────────────────────────────────
 export type HumanAction =
   | "click" | "fill" | "type" | "select" | "navigate"
-  | "wait" | "scroll" | "press" | "hover" | "done" | "fail";
+  | "wait" | "scroll" | "press" | "hover" | "done" | "fail" | "check_case";
 
 export interface ActionDecision {
   action: HumanAction;
@@ -80,8 +80,10 @@ export interface HumanAgentConfig {
   maxSteps?: number;
   categories?: string[];
   sheetRawTable?: string;
-  similarContext?: string;  // past similar test failures injected as context
+  similarContext?: string;
+  testCases?: TestCaseInput[];  // checkpoint-based: cases to cover in single run
   onStep?: (step: HumanStep) => void;
+  onCaseCheck?: (caseId: string, status: "done" | "fail", description: string) => void;
 }
 
 export interface TestCaseInput {
@@ -131,7 +133,12 @@ const INTERACTIVE_ROLES = new Set([
 const CACHE_BUSTING_ACTIONS = new Set<HumanAction>(["navigate", "click", "select", "press", "type", "fill", "scroll", "hover"]);
 
 // ─── Planning System Prompt ───────────────────────────────────
-function buildPlanningSystem(goal: string, categories: string[], similarContext = ""): string {
+function buildPlanningSystem(
+  goal: string,
+  categories: string[],
+  similarContext = "",
+  testCases: TestCaseInput[] = [],
+): string {
   const effectiveGoal = goal.trim() ||
     "Freely explore this web application and perform comprehensive QA testing — navigate all key features, try common user flows, and identify any bugs or issues.";
   const categoryLine = categories.length ? `\nFocus areas: ${categories.join(", ")}` : "";
@@ -139,8 +146,27 @@ function buildPlanningSystem(goal: string, categories: string[], similarContext 
     ? `\n\n## 과거 유사 테스트 참고 (실수 반복 방지)\n${similarContext}`
     : "";
 
+  const checkCaseSection = testCases.length > 0 ? `
+
+## 테스트 케이스 체크포인트 규칙 (필수)
+당신은 아래 ${testCases.length}개의 테스트 케이스를 모두 완료해야 합니다.
+각 케이스를 완료(또는 실패 판정)했을 때 반드시 "check_case" 액션으로 신고하세요.
+
+테스트 케이스 목록:
+${testCases.map((tc, i) => `[${i + 1}] ID=${tc.id} | ${tc.title}
+  단계: ${tc.steps}
+  기대결과: ${tc.expectedResult}`).join("\n\n")}
+
+check_case 규칙:
+- target: 케이스 ID (예: "${testCases[0].id}")
+- value: "done" (기대결과 충족) 또는 "fail" (버그 발견 또는 불가)
+- description: 테스트 결과 한 문장 요약
+- 아직 check_case를 보내지 않은 케이스가 남아 있으면 절대 "done"이나 "fail"로 종료하지 마세요.
+- 순서는 자유롭게 — 로그인/팝업 처리 등 필요한 중간 작업은 자유롭게 하세요.
+- 모든 케이스가 check_case로 완료된 후에만 "done"을 사용하세요.` : "";
+
   return `You are an expert QA tester operating a web browser. You can SEE the current screenshot.
-YOUR GOAL (never forget this): "${effectiveGoal}"${categoryLine}${memoryLine}
+YOUR GOAL (never forget this): "${effectiveGoal}"${categoryLine}${memoryLine}${checkCaseSection}
 
 Each step you receive:
   1. A11Y_REFS — live interactive elements from the accessibility tree.
@@ -150,21 +176,21 @@ Each step you receive:
   Elements marked [iframe] are inside a child frame (e.g., embedded chat widget). You CAN interact with them normally using their @eN ref.
 
 Action rules:
-- "target" MUST be an @eN ref from A11Y_REFS (or a full URL for navigate).
+- "target" MUST be an @eN ref from A11Y_REFS (or a full URL for navigate). Exception: check_case uses case ID as target.
 - If you can SEE an element in the screenshot but it's NOT in A11Y_REFS: use scroll or wait, then retry.
 - For chat widgets or embedded apps: look for [iframe] elements in A11Y_REFS — they are already captured and clickable.
 - To type into a FIELD: use "fill" (replaces entire content) or "type" (appends characters).
 - To pick from a dropdown/combobox: use "select" with value = the option text.
 - After FAILED/UNVERIFIED action: try a completely different element or approach.
-- Use "done" when the goal is fully achieved. Use "fail" only if you've exhausted all options.
+- Use "done" when ALL test cases are checked (or no cases: when goal is fully achieved). Use "fail" only if you've exhausted all options.
 - Detect real bugs: wrong error messages, missing features, broken navigation, data loss.
 
 Respond with ONLY raw JSON (no markdown, no code fences):
 {
   "screen_description": "brief description of what you see on screen right now",
-  "action": "click|fill|type|select|navigate|wait|scroll|press|hover|done|fail",
-  "target": "@eN ref | full URL for navigate",
-  "value": "text to fill | option text for select | ms for wait | pixels for scroll | key for press",
+  "action": "click|fill|type|select|navigate|wait|scroll|press|hover|check_case|done|fail",
+  "target": "@eN ref | full URL for navigate | case ID for check_case",
+  "value": "text to fill | option text for select | ms for wait | pixels for scroll | key for press | done/fail for check_case",
   "description": "what you are doing and why (mention target by name, not just @ref)",
   "observation": "one-sentence current page state summary"
 }`;
@@ -187,7 +213,10 @@ export class HumanAgentRunner {
   private frames: Frame[] = [];
   private refMap: Map<string, A11yRef> = new Map();
   private a11yCache: { url: string; refs: A11yRef[] } | null = null;
-  private qwenCache: { url: string; perception: string } | null = null;  // Qwen result per URL
+  private qwenCache: { url: string; perception: string } | null = null;
+
+  // checkpoint-based case tracking
+  private checkedCases: Map<string, { status: "done" | "fail"; description: string }> = new Map();
 
   constructor(config: HumanAgentConfig) {
     this.config = config;
@@ -372,8 +401,31 @@ export class HumanAgentRunner {
         );
       }
 
-      if (decision.action === "done") { status = "done"; summary = decision.description; break; }
-      if (decision.action === "fail") { status = "fail"; summary = decision.description; break; }
+      // Checkpoint: check_case actions don't break the loop
+      if (decision.action === "check_case") {
+        await this.page!.waitForTimeout(300);
+        continue;
+      }
+
+      if (decision.action === "done" || decision.action === "fail") {
+        // If we have test cases and some are unchecked, override and continue
+        const testCases = this.config.testCases ?? [];
+        if (testCases.length > 0) {
+          const unchecked = testCases.filter(tc => !this.checkedCases.has(tc.id));
+          if (unchecked.length > 0) {
+            this.lastFailureContext =
+              `⚠️ 아직 완료하지 않은 테스트 케이스가 ${unchecked.length}개 있습니다. ` +
+              `check_case로 완료 신고 후에만 done/fail 사용 가능.\n` +
+              `미완료 케이스: ${unchecked.map(tc => `[${tc.id}] ${tc.title}`).join(", ")}`;
+            logger.info(`[checkpoint] Overriding '${decision.action}' — ${unchecked.length} cases remain`);
+            await this.page!.waitForTimeout(600);
+            continue;
+          }
+        }
+        status = decision.action === "done" ? "done" : "fail";
+        summary = decision.description;
+        break;
+      }
 
       await this.page!.waitForTimeout(600);
     }
@@ -877,6 +929,15 @@ export class HumanAgentRunner {
       ? `\n\n--- TEST SHEET (use as additional context) ---\n${this.config.sheetRawTable}`
       : "";
 
+    const testCases = this.config.testCases ?? [];
+    const uncheckedCases = testCases.filter(tc => !this.checkedCases.has(tc.id));
+    const checkedCasesText = testCases.length > 0
+      ? `\n\n--- 케이스 진행 상황 (${testCases.length - uncheckedCases.length}/${testCases.length} 완료) ---\n` +
+        (uncheckedCases.length > 0
+          ? `미완료 케이스 (check_case로 완료 신고 필수):\n${uncheckedCases.map(tc => `• [${tc.id}] ${tc.title}`).join("\n")}`
+          : "✅ 모든 케이스 완료 — 이제 done을 사용하세요.")
+      : "";
+
     const refsText = a11yRefs.length
       ? a11yRefs.map(r => {
           let line = `${r.ref} [${r.role}]${r.frameIndex ? " [iframe]" : ""} "${r.name}"`;
@@ -901,6 +962,7 @@ export class HumanAgentRunner {
       `Step: ${stepNum}/${maxSteps} (${stepsLeft} steps remaining)`,
       historyText,
       sheetText,
+      checkedCasesText,
       failureText,
       qwenSection,
       "--- A11Y_REFS (ONLY use @eN as target for click/fill/select/type/hover) ---",
@@ -913,6 +975,7 @@ export class HumanAgentRunner {
       this.config.goal,
       this.config.categories ?? [],
       this.config.similarContext ?? "",
+      this.config.testCases ?? [],
     );
 
     try {
@@ -1074,6 +1137,15 @@ Respond ONLY with raw JSON: {"succeeded": true/false, "observation": "1 sentence
           await p.keyboard.press(d.value ?? "Enter");
           await p.waitForTimeout(600);
           break;
+
+        case "check_case": {
+          // No browser action — just record the checkpoint
+          const caseId = d.target ?? "";
+          const caseStatus = (d.value === "fail" ? "fail" : "done") as "done" | "fail";
+          this.checkedCases.set(caseId, { status: caseStatus, description: d.description });
+          this.config.onCaseCheck?.(caseId, caseStatus, d.description);
+          break;
+        }
 
         case "done":
         case "fail":

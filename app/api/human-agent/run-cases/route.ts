@@ -1,7 +1,7 @@
 /**
  * POST /api/human-agent/run-cases
- * Sequential test case execution — one browser session, N focused runs
- * Each test case gets its own isolated agent loop with a precise goal.
+ * Checkpoint-based single-session execution — one browser run covers all cases.
+ * Agent uses check_case action to signal per-case completion.
  * Streams progress via SSE.
  */
 
@@ -25,7 +25,7 @@ const RequestSchema = z.object({
   testCases: z.array(TestCaseSchema).min(1).max(50),
   loginEmail: z.string().email().optional(),
   loginPassword: z.string().optional(),
-  maxStepsPerCase: z.number().min(3).max(30).default(15),
+  maxSteps: z.number().min(5).max(200).default(60),
   categories: z.array(z.string()).optional(),
 });
 
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { targetUrl, testCases, loginEmail, loginPassword, maxStepsPerCase, categories } = parsed.data;
+    const { targetUrl, testCases, loginEmail, loginPassword, maxSteps, categories } = parsed.data;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -58,67 +58,46 @@ export async function POST(req: NextRequest) {
         const pingInterval = setInterval(ping, 15_000);
 
         try {
-          send({ type: "start", message: `테스트 케이스 순차 실행 시작 — ${testCases.length}개 케이스`, targetUrl });
+          send({
+            type: "start",
+            message: `체크포인트 실행 시작 — ${testCases.length}개 케이스, 단일 브라우저 세션`,
+            targetUrl,
+            totalCases: testCases.length,
+          });
+
+          const goal = [
+            `아래 ${testCases.length}개 테스트 케이스를 모두 수행하세요.`,
+            `각 케이스 완료 후 check_case로 결과를 신고하고, 모두 완료된 후에만 done을 사용하세요.`,
+            `로그인, 팝업, 페이지 이동 등 중간 작업은 자유롭게 처리하세요.`,
+          ].join(" ");
 
           const runner = new HumanAgentRunner({
             targetUrl,
-            goal: "",  // overridden per case inside runTestCases
+            goal,
             loginEmail,
             loginPassword,
-            maxSteps: maxStepsPerCase,
+            maxSteps,
             categories,
-          });
-
-          const results = await runner.runTestCases(testCases, maxStepsPerCase, {
-            onCaseStart: (idx, tc) => {
-              send({ type: "case_start", caseIndex: idx, total: testCases.length, caseId: tc.id, title: tc.title });
+            testCases,
+            onStep: (step) => {
+              send({ type: "step", step });
             },
-            onStep: (step, caseIdx, caseId) => {
-              send({ type: "step", step, caseIndex: caseIdx, caseId });
-            },
-            onCaseComplete: (result, idx) => {
+            onCaseCheck: (caseId, status, description) => {
+              const tc = testCases.find(c => c.id === caseId);
               send({
-                type: "case_complete",
-                caseIndex: idx,
-                caseId: result.caseId,
-                title: result.title,
-                status: result.status,
-                summary: result.summary,
-                stepCount: result.steps.length,
-                durationMs: result.durationMs,
+                type: "case_checkpoint",
+                caseId,
+                title: tc?.title ?? caseId,
+                status,
+                description,
               });
+              logger.info(`[checkpoint] case=${caseId} status=${status}`);
             },
           });
 
-          const passCount = results.filter(r => r.status === "done").length;
-          const failCount = results.filter(r => r.status === "fail").length;
-          const incompleteCount = results.filter(r => r.status === "max_steps").length;
-          const allSteps = results.flatMap(r => r.steps);
-          const totalDurationMs = results.reduce((sum, r) => sum + r.durationMs, 0);
+          const result = await runner.run();
 
-          const summaryParts = [`총 ${testCases.length}개 케이스: ${passCount}개 통과, ${failCount}개 실패`];
-          if (incompleteCount > 0) summaryParts.push(`${incompleteCount}개 미완료`);
-
-          send({
-            type: "complete",
-            result: {
-              sessionId: "",
-              goal: `${testCases.length}개 테스트 케이스 순차 실행`,
-              targetUrl,
-              steps: allSteps,
-              status: failCount > 0 ? "fail" : "done",
-              summary: summaryParts.join(", "),
-              totalDurationMs,
-            },
-            caseResults: results.map(r => ({
-              caseId: r.caseId,
-              title: r.title,
-              status: r.status,
-              summary: r.summary,
-              stepCount: r.steps.length,
-              durationMs: r.durationMs,
-            })),
-          });
+          send({ type: "complete", result });
 
         } catch (err) {
           logger.error({ err }, "run-cases error");
