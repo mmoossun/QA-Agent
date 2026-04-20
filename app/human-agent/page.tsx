@@ -484,8 +484,6 @@ export default function HumanAgentPage() {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
       try {
-        // maxSteps scales with case count: each case gets ~15 steps budget
-        const totalSteps = Math.min(testCases.length * 15, 150);
         const res = await fetch("/api/human-agent/run-cases", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -494,7 +492,7 @@ export default function HumanAgentPage() {
             testCases: testCases.map(tc => ({ id: tc.id, title: tc.title, steps: tc.steps, expectedResult: tc.expectedResult })),
             loginEmail: target.loginEmail || undefined,
             loginPassword: target.loginPassword || undefined,
-            maxSteps: totalSteps,
+            maxSteps,
             categories: Array.from(categories),
           }),
         });
