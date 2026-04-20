@@ -84,6 +84,22 @@ export interface HumanAgentConfig {
   onStep?: (step: HumanStep) => void;
 }
 
+export interface TestCaseInput {
+  id: string;
+  title: string;
+  steps: string;
+  expectedResult: string;
+}
+
+export interface CaseRunResult {
+  caseId: string;
+  title: string;
+  status: "done" | "fail" | "max_steps";
+  steps: HumanStep[];
+  summary: string;
+  durationMs: number;
+}
+
 // ─── A11y Ref ─────────────────────────────────────────────────
 interface A11yRef {
   ref: string;          // @e1, @e2 …
@@ -206,148 +222,7 @@ export class HumanAgentRunner {
         await this._tryLogin();
       }
 
-      let status: HumanAgentResult["status"] = "max_steps";
-      let summary = "";
-
-      for (let step = 1; step <= maxSteps; step++) {
-        const stepStart = Date.now();
-
-        // ── Stall guard ────────────────────────────────────────
-        if (this._isStalled()) {
-          await this._recoverFromStall();
-          this.recentActionKeys = [];
-        }
-
-        // ── 3+ consecutive failures → stronger recovery ────────
-        if (this.consecutiveFailures >= 3) {
-          logger.warn("3 consecutive failures — triggering recovery");
-          await this._recoverFromStall();
-          this.consecutiveFailures = 0;
-          this.lastFailureContext = null;
-        }
-
-        // ── Step 1a: Screenshot (needed by both Qwen and GPT-4o) ──
-        const percStart = Date.now();
-        const currentUrl = this.page!.url();
-        const { base64, publicPath } = await this._screenshot(`step${step}`);
-
-        // ── Step 1b: A11y + Qwen in parallel ─────────────────
-        // Qwen: URL-based cache hit = 0ms; miss = run with 25s timeout
-        const qwenTask: Promise<string> = (this.qwenCache?.url === currentUrl)
-          ? Promise.resolve(this.qwenCache.perception)
-          : this._withTimeout(perceiveScreen(base64, currentUrl), 25_000, "");
-
-        const [a11yRefs, rawQwen] = await Promise.all([
-          this._snapshotA11y(false),
-          qwenTask,
-        ]);
-
-        const qwenPerception = rawQwen;
-
-        // Update Qwen cache on new URL result
-        if (qwenPerception && this.qwenCache?.url !== currentUrl) {
-          this.qwenCache = { url: currentUrl, perception: qwenPerception };
-        }
-
-        const perceptionMs = Date.now() - percStart;
-
-        // ── Step 2: GPT-4o Vision + Planning (with Qwen context) ──
-        const planStart = Date.now();
-        const decision = await this._withTimeout(
-          this._plan(base64, a11yRefs, step, maxSteps, qwenPerception),
-          40_000,
-          { action: "wait", value: "1500", description: "플래닝 타임아웃", observation: "타임아웃", screen_description: "" },
-        );
-        const planningMs = Date.now() - planStart;
-
-        const perception = qwenPerception || decision.screen_description || "";
-
-        this.recentActionKeys.push(`${decision.action}:${decision.target ?? ""}`);
-        if (this.recentActionKeys.length > 5) this.recentActionKeys.shift();
-
-        // ── Step 3: Execution ─────────────────────────────────
-        const preUrl = this.page.url();
-        let { success, error } = await this._withTimeout(
-          this._execute(decision),
-          30_000,
-          { success: false, error: "실행 타임아웃 (30s)" },
-        );
-
-        // Invalidate A11y + Qwen cache after DOM-changing actions
-        if (CACHE_BUSTING_ACTIONS.has(decision.action)) {
-          this.a11yCache = null;
-          // Qwen cache is URL-based: only invalidate on explicit navigate
-          if (decision.action === "navigate") this.qwenCache = null;
-        }
-
-        // ── Step 3b: Validation (skip for wait/scroll/hover) ──
-        if (success && ["click", "navigate", "fill", "type", "select"].includes(decision.action)) {
-          const validation = await this._withTimeout(
-            this._validate(decision, preUrl),
-            12_000,
-            { succeeded: true, observation: "validation skipped (timeout)" },
-          );
-          if (!validation.succeeded) {
-            this.lastFailureContext =
-              `Action executed but result looks wrong: ${validation.observation}.` +
-              (validation.suggestion ? ` Try: ${validation.suggestion}` : "");
-            success = false;
-            error = validation.observation;
-          } else {
-            this.lastFailureContext = null;
-          }
-        } else if (!success) {
-          this.lastFailureContext = `Execution error: ${error}`;
-        } else {
-          this.lastFailureContext = null;
-        }
-
-        if (success) {
-          this.consecutiveFailures = 0;
-        } else {
-          this.consecutiveFailures++;
-        }
-
-        const humanStep: HumanStep = {
-          stepNumber: step,
-          perception,
-          decision,
-          screenshotPath: publicPath,
-          success,
-          error,
-          durationMs: Date.now() - stepStart,
-          perceptionMs,
-          planningMs,
-        };
-
-        this.steps.push(humanStep);
-        this.config.onStep?.(humanStep);
-
-        const historyLine =
-          `Step ${step} [${decision.action}${decision.target ? " " + decision.target : ""}]: ${decision.description}` +
-          (error ? ` ← FAILED: ${error}` : " ✓");
-        this.actionHistory.push(historyLine);
-
-        // ② Compress history: keep last 6 full, summarise older
-        if (this.actionHistory.length > 6) {
-          const oldest = this.actionHistory.shift()!;
-          const succeeded = !oldest.includes("FAILED");
-          this.accomplishments.push(
-            succeeded
-              ? oldest.replace(/Step \d+ /, "").split(":").slice(1).join(":").trim()
-              : `[FAILED] ${oldest.split(":").slice(1).join(":").trim()}`
-          );
-        }
-
-        if (decision.action === "done") { status = "done"; summary = decision.description; break; }
-        if (decision.action === "fail") { status = "fail"; summary = decision.description; break; }
-
-        await this.page.waitForTimeout(600);
-      }
-
-      if (status === "max_steps") {
-        summary = `최대 ${maxSteps} 스텝 도달. 마지막 관찰: ${this.steps.at(-1)?.decision.observation ?? ""}`;
-      }
+      const { status, summary } = await this._runLoop(maxSteps);
 
       // Auto-logout after test completes (only if we logged in)
       if (this.config.loginEmail && this.config.loginPassword) {
@@ -363,6 +238,250 @@ export class HumanAgentRunner {
         summary,
         totalDurationMs: Date.now() - startTime,
       };
+    } finally {
+      await this.browser?.close();
+    }
+  }
+
+  // ── Core step loop (shared by run() and runTestCases()) ───────
+  private async _runLoop(
+    maxSteps: number,
+    stepOffset = 0,
+  ): Promise<{ status: "done" | "fail" | "max_steps"; summary: string }> {
+    let status: "done" | "fail" | "max_steps" = "max_steps";
+    let summary = "";
+
+    for (let step = 1; step <= maxSteps; step++) {
+      const stepStart = Date.now();
+
+      // ── Stall guard ──────────────────────────────────────────
+      if (this._isStalled()) {
+        await this._recoverFromStall();
+        this.recentActionKeys = [];
+      }
+
+      // ── 3+ consecutive failures → stronger recovery ──────────
+      if (this.consecutiveFailures >= 3) {
+        logger.warn("3 consecutive failures — triggering recovery");
+        await this._recoverFromStall();
+        this.consecutiveFailures = 0;
+        this.lastFailureContext = null;
+      }
+
+      // ── Step 1a: Screenshot ──────────────────────────────────
+      const percStart = Date.now();
+      const currentUrl = this.page!.url();
+      const { base64, publicPath } = await this._screenshot(`step${step + stepOffset}`);
+
+      // ── Step 1b: A11y + Qwen in parallel ─────────────────────
+      const qwenTask: Promise<string> = (this.qwenCache?.url === currentUrl)
+        ? Promise.resolve(this.qwenCache.perception)
+        : this._withTimeout(perceiveScreen(base64, currentUrl), 25_000, "");
+
+      const [a11yRefs, rawQwen] = await Promise.all([
+        this._snapshotA11y(false),
+        qwenTask,
+      ]);
+
+      const qwenPerception = rawQwen;
+      if (qwenPerception && this.qwenCache?.url !== currentUrl) {
+        this.qwenCache = { url: currentUrl, perception: qwenPerception };
+      }
+
+      const perceptionMs = Date.now() - percStart;
+
+      // ── Step 2: GPT-4o Vision + Planning ─────────────────────
+      const planStart = Date.now();
+      const decision = await this._withTimeout(
+        this._plan(base64, a11yRefs, step, maxSteps, qwenPerception),
+        40_000,
+        { action: "wait", value: "1500", description: "플래닝 타임아웃", observation: "타임아웃", screen_description: "" },
+      );
+      const planningMs = Date.now() - planStart;
+
+      const perception = qwenPerception || decision.screen_description || "";
+
+      this.recentActionKeys.push(`${decision.action}:${decision.target ?? ""}`);
+      if (this.recentActionKeys.length > 5) this.recentActionKeys.shift();
+
+      // ── Step 3: Execution ─────────────────────────────────────
+      const preUrl = this.page!.url();
+      let { success, error } = await this._withTimeout(
+        this._execute(decision),
+        30_000,
+        { success: false, error: "실행 타임아웃 (30s)" },
+      );
+
+      if (CACHE_BUSTING_ACTIONS.has(decision.action)) {
+        this.a11yCache = null;
+        if (decision.action === "navigate") this.qwenCache = null;
+      }
+
+      // ── Step 3b: Validation ───────────────────────────────────
+      if (success && ["click", "navigate", "fill", "type", "select"].includes(decision.action)) {
+        const validation = await this._withTimeout(
+          this._validate(decision, preUrl),
+          12_000,
+          { succeeded: true, observation: "validation skipped (timeout)" },
+        );
+        if (!validation.succeeded) {
+          this.lastFailureContext =
+            `Action executed but result looks wrong: ${validation.observation}.` +
+            (validation.suggestion ? ` Try: ${validation.suggestion}` : "");
+          success = false;
+          error = validation.observation;
+        } else {
+          this.lastFailureContext = null;
+        }
+      } else if (!success) {
+        this.lastFailureContext = `Execution error: ${error}`;
+      } else {
+        this.lastFailureContext = null;
+      }
+
+      if (success) { this.consecutiveFailures = 0; }
+      else { this.consecutiveFailures++; }
+
+      const humanStep: HumanStep = {
+        stepNumber: step + stepOffset,
+        perception,
+        decision,
+        screenshotPath: publicPath,
+        success,
+        error,
+        durationMs: Date.now() - stepStart,
+        perceptionMs,
+        planningMs,
+      };
+
+      this.steps.push(humanStep);
+      this.config.onStep?.(humanStep);
+
+      const historyLine =
+        `Step ${step} [${decision.action}${decision.target ? " " + decision.target : ""}]: ${decision.description}` +
+        (error ? ` ← FAILED: ${error}` : " ✓");
+      this.actionHistory.push(historyLine);
+
+      if (this.actionHistory.length > 6) {
+        const oldest = this.actionHistory.shift()!;
+        const succeeded = !oldest.includes("FAILED");
+        this.accomplishments.push(
+          succeeded
+            ? oldest.replace(/Step \d+ /, "").split(":").slice(1).join(":").trim()
+            : `[FAILED] ${oldest.split(":").slice(1).join(":").trim()}`
+        );
+      }
+
+      if (decision.action === "done") { status = "done"; summary = decision.description; break; }
+      if (decision.action === "fail") { status = "fail"; summary = decision.description; break; }
+
+      await this.page!.waitForTimeout(600);
+    }
+
+    if (status === "max_steps") {
+      summary = `최대 ${maxSteps} 스텝 도달. 마지막 관찰: ${this.steps.at(-1)?.decision.observation ?? ""}`;
+    }
+    return { status, summary };
+  }
+
+  // ── Reset per-case state (keep browser/page open) ─────────────
+  private _resetPerCaseState(): void {
+    this.steps = [];
+    this.actionHistory = [];
+    this.accomplishments = [];
+    this.lastFailureContext = null;
+    this.recentActionKeys = [];
+    this.consecutiveFailures = 0;
+    this.refMap = new Map();
+    this.a11yCache = null;
+    this.qwenCache = null;
+  }
+
+  // ── Sequential test case runner (one browser, N focused runs) ─
+  async runTestCases(
+    testCases: TestCaseInput[],
+    maxStepsPerCase: number,
+    callbacks: {
+      onCaseStart: (idx: number, tc: TestCaseInput) => void;
+      onStep: (step: HumanStep, caseIdx: number, caseId: string) => void;
+      onCaseComplete: (result: CaseRunResult, idx: number) => void;
+    },
+  ): Promise<CaseRunResult[]> {
+    const browser = await chromium.launch({ headless: true });
+    this.browser = browser;
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      locale: "ko-KR",
+      timezoneId: "Asia/Seoul",
+    });
+    this.page = await ctx.newPage();
+    ctx.on("dialog", async (dialog) => {
+      logger.info(`[dialog] type=${dialog.type()} msg="${dialog.message().slice(0, 80)}" → accepted`);
+      try { await dialog.accept(); } catch { /* already dismissed */ }
+    });
+
+    try {
+      await this.page.goto(this.config.targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await this._waitForStable();
+      if (this.config.loginEmail && this.config.loginPassword) {
+        await this._tryLogin();
+      }
+
+      const results: CaseRunResult[] = [];
+      let globalStepOffset = 0;
+
+      for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i];
+        this._resetPerCaseState();
+
+        // Build a focused, unambiguous goal for this single test case
+        this.config.goal = [
+          `테스트 케이스 [${tc.id}]: ${tc.title}`,
+          ``,
+          `실행 단계:`,
+          tc.steps,
+          ``,
+          `기대 결과:`,
+          tc.expectedResult,
+          ``,
+          `위 단계들을 순서대로 정확히 실행하세요.`,
+          `기대 결과가 충족되면 "done", 버그를 발견하거나 실행이 불가능하면 "fail"로 종료하세요.`,
+        ].join("\n");
+
+        this.config.onStep = (step) => callbacks.onStep(step, i, tc.id);
+        callbacks.onCaseStart(i, tc);
+
+        const caseStart = Date.now();
+        const { status, summary } = await this._runLoop(maxStepsPerCase, globalStepOffset);
+        globalStepOffset += this.steps.length;
+
+        const result: CaseRunResult = {
+          caseId: tc.id,
+          title: tc.title,
+          status,
+          steps: [...this.steps],
+          summary,
+          durationMs: Date.now() - caseStart,
+        };
+        results.push(result);
+        callbacks.onCaseComplete(result, i);
+
+        // Navigate back to start URL for next case
+        if (i < testCases.length - 1) {
+          try {
+            await this.page.goto(this.config.targetUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+            await this._waitForStable();
+          } catch (e) {
+            logger.warn({ e }, "Failed to navigate back between test cases");
+          }
+        }
+      }
+
+      if (this.config.loginEmail && this.config.loginPassword) {
+        await this._tryLogout();
+      }
+
+      return results;
     } finally {
       await this.browser?.close();
     }

@@ -28,6 +28,15 @@ const CATEGORIES: { id: Category; emoji: string }[] = [
 
 interface ParsedSheet { rawTable?: string; fileName: string; rowCount: number; }
 
+interface CaseProgress {
+  caseId: string;
+  title: string;
+  status: "pending" | "running" | "done" | "fail" | "max_steps";
+  stepCount: number;
+  summary?: string;
+  durationMs?: number;
+}
+
 // Extract column format description from a markdown table string (for uploaded files)
 function extractFileFormat(rawTable: string, fileName: string): string {
   const lines = rawTable.split("\n");
@@ -56,6 +65,10 @@ interface TargetRun {
   result: HumanAgentResult | null;
   status: "pending" | "running" | "done" | "fail" | "max_steps" | "error";
   error?: string;
+  // case-by-case mode
+  cases?: CaseProgress[];
+  currentCaseIndex?: number;
+  totalCases?: number;
 }
 
 const DEFAULT_TARGETS: TargetEntry[] = [
@@ -448,40 +461,85 @@ export default function HumanAgentPage() {
     setRunning(false);
   };
 
-  // ── Run agent using generated test cases ─────────────────
+  // ── Run agent using test cases (sequential, one case at a time) ─
   const runFromCases = async () => {
     const active = targets.filter(t => t.enabled && t.url.trim());
     if (!active.length || testCases.length === 0 || running) return;
-
-    // Synthesize goal — inject test cases into goal text
-    const casesList = testCases.slice(0, 20)
-      .map(tc => `[${tc.id}] ${tc.title}\n스텝: ${tc.steps}\n기대결과: ${tc.expectedResult}`)
-      .join("\n\n");
-    const userPart = goal.trim() ? `${goal.trim()}\n\n` : "";
-    const synthesizedGoal = `${userPart}다음 테스트 케이스들을 순서대로 실행하며 QA를 수행해주세요.\n\n실행할 테스트 케이스 목록 (${testCases.length}개):\n${casesList}`;
 
     setMode("run");
     setRunning(true);
     setExpandedStep(null);
     setReports({});
     setReportView("steps");
-    const initial: TargetRun[] = active.map(t => ({ target: t, steps: [], result: null, status: "pending" }));
+    const initial: TargetRun[] = active.map(t => ({
+      target: t, steps: [], result: null, status: "pending" as const,
+      cases: testCases.map(tc => ({ caseId: tc.id, title: tc.title, status: "pending" as const, stepCount: 0 })),
+      totalCases: testCases.length,
+      currentCaseIndex: -1,
+    }));
     setRuns(initial);
     setActiveTab(active[0].id);
 
+    // Each target runs sequentially; for multi-target just first for now
     for (let i = 0; i < active.length; i++) {
       const target = active[i];
       setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
       try {
-        await streamRun(i, target, {
-          targetUrl: target.url,
-          goal: synthesizedGoal,
-          loginEmail: target.loginEmail || undefined,
-          loginPassword: target.loginPassword || undefined,
-          maxSteps,
-          categories: Array.from(categories),
-          sheetRawTable: sheet?.rawTable || undefined,
+        const res = await fetch("/api/human-agent/run-cases", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targetUrl: target.url,
+            testCases: testCases.map(tc => ({ id: tc.id, title: tc.title, steps: tc.steps, expectedResult: tc.expectedResult })),
+            loginEmail: target.loginEmail || undefined,
+            loginPassword: target.loginPassword || undefined,
+            maxStepsPerCase: Math.min(Math.max(maxSteps, 5), 20),
+            categories: Array.from(categories),
+          }),
         });
+        if (!res.body) throw new Error("No response body");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n"); buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.type === "case_start") {
+                setRuns(p => p.map((r, idx) => idx === i ? {
+                  ...r,
+                  currentCaseIndex: evt.caseIndex,
+                  cases: r.cases?.map((c, ci) => ci === evt.caseIndex ? { ...c, status: "running" as const } : c),
+                } : r));
+              } else if (evt.type === "step") {
+                setRuns(p => p.map((r, idx) => idx === i ? { ...r, steps: [...r.steps, evt.step] } : r));
+              } else if (evt.type === "case_complete") {
+                setRuns(p => p.map((r, idx) => idx === i ? {
+                  ...r,
+                  cases: r.cases?.map((c, ci) => ci === evt.caseIndex ? {
+                    ...c,
+                    status: evt.status as CaseProgress["status"],
+                    stepCount: evt.stepCount,
+                    summary: evt.summary,
+                    durationMs: evt.durationMs,
+                  } : c),
+                } : r));
+              } else if (evt.type === "complete") {
+                setRuns(p => p.map((r, idx) => idx === i ? {
+                  ...r, result: evt.result, status: evt.result.status, currentCaseIndex: undefined,
+                } : r));
+                saveToDashboard(target, evt.result);
+              } else if (evt.type === "error") {
+                setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: evt.message } : r));
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        }
       } catch (err) {
         setRuns(p => p.map((r, idx) => idx === i ? { ...r, status: "error", error: String(err) } : r));
       }
@@ -511,24 +569,56 @@ export default function HumanAgentPage() {
         }
       }
 
-      // Convert HumanStep[] → TestCase[] so existing sheet format logic can apply
-      const testCases: TestCase[] = run.steps.map((step) => ({
-        id: `STEP-${String(step.stepNumber).padStart(3, "0")}`,
-        category: step.decision.action,
-        title: step.decision.description,
-        steps: [
-          `액션: ${step.decision.action}`,
-          step.decision.target ? `대상: ${step.decision.target}` : null,
-          step.decision.value  ? `입력값: ${step.decision.value}` : null,
-        ].filter(Boolean).join("\n"),
-        expectedResult: step.decision.observation,
-        priority: "Medium" as const,
-        status: step.success ? "Pass" as const : "Fail" as const,
-        notes: step.error ?? "",
-      }));
+      // Convert run results → TestCase[] in a human-readable format
+      const ACTION_KO: Record<string, string> = {
+        click: "클릭", fill: "입력", type: "텍스트 입력", select: "선택",
+        navigate: "페이지 이동", scroll: "스크롤", wait: "대기",
+        press: "키 입력", hover: "마우스 오버", done: "완료", fail: "실패",
+      };
+
+      // Use case-level results if available (sequential case mode), else use steps
+      const exportItems: TestCase[] = (() => {
+        if (run.cases && run.cases.some(c => c.status !== "pending")) {
+          // Case-by-case mode: one row per test case
+          return run.cases.map((c, i) => {
+            const caseSteps = run.steps.filter((_, si) => {
+              // Group steps by case — cases are ordered, each gets stepCount steps
+              let offset = 0;
+              for (let ci = 0; ci < i; ci++) offset += run.cases![ci].stepCount;
+              const localIdx = si - offset;
+              return localIdx >= 0 && localIdx < c.stepCount;
+            });
+            const passSteps = caseSteps.filter(s => s.success).length;
+            return {
+              id: c.caseId,
+              category: c.status === "done" ? "통과" : c.status === "fail" ? "실패" : "미완료",
+              title: c.title,
+              steps: caseSteps.map((s, si) => `${si + 1}. ${s.decision.description}`).join("\n") || "-",
+              expectedResult: c.summary ?? "-",
+              priority: "Medium" as const,
+              status: c.status === "done" ? "Pass" as const : c.status === "fail" ? "Fail" as const : "Skip" as const,
+              notes: `${passSteps}/${caseSteps.length}스텝 성공${c.durationMs ? ` · ${(c.durationMs / 1000).toFixed(1)}s` : ""}`,
+            };
+          });
+        }
+        // Free-run mode: one row per step
+        return run.steps.map((step) => ({
+          id: `STEP-${String(step.stepNumber).padStart(3, "0")}`,
+          category: ACTION_KO[step.decision.action] ?? step.decision.action,
+          title: step.decision.description,
+          steps: [
+            step.decision.description,
+            step.decision.value ? `입력값: "${step.decision.value}"` : null,
+          ].filter(Boolean).join("\n"),
+          expectedResult: step.decision.observation,
+          priority: "Medium" as const,
+          status: step.success ? "Pass" as const : "Fail" as const,
+          notes: step.success ? "성공" : step.error ? `실패: ${step.error}` : "실패",
+        }));
+      })();
 
       setRunExportStatus("📤 내보내는 중...");
-      const body: Record<string, unknown> = { sheetId: sheetId.trim(), testCases };
+      const body: Record<string, unknown> = { sheetId: sheetId.trim(), testCases: exportItems };
       if (selectedTab) body.tab = selectedTab;
       const res = await fetch("/api/google-sheets", {
         method: "POST",
@@ -537,7 +627,7 @@ export default function HumanAgentPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "내보내기 실패");
-      setRunExportStatus(`✅ ${run.steps.length}개 스텝 결과 → 새 탭 "${data.newTabName}"에 저장됐습니다`);
+      setRunExportStatus(`✅ ${exportItems.length}개 결과 → 새 탭 "${data.newTabName}"에 저장됐습니다`);
     } catch (e) {
       setRunExportStatus(`❌ ${String(e)}`);
     } finally {
@@ -856,6 +946,13 @@ export default function HumanAgentPage() {
               </button>
             </div>
           )}
+          {mode === "run" && running && activeRun?.cases && activeRun.currentCaseIndex !== undefined && activeRun.currentCaseIndex >= 0 && (
+            <span className="flex items-center gap-1.5 text-xs text-purple-600 ml-2">
+              <span className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
+              케이스 {activeRun.currentCaseIndex + 1}/{activeRun.totalCases}:&nbsp;
+              <span className="max-w-48 truncate">{activeRun.cases[activeRun.currentCaseIndex]?.title}</span>
+            </span>
+          )}
           {mode === "run" && runs.length > 0 && !running && (
             <span className="text-xs text-gray-400 ml-auto">{activeRun?.steps.length ?? 0} 스텝</span>
           )}
@@ -1105,6 +1202,41 @@ function TargetCard({ target, onChange, onRemove, disabled }: {
   );
 }
 
+// ─── Case Results Table ─────────────────────────────────────────
+function CaseResultsTable({ cases }: { cases: CaseProgress[] }) {
+  const done = cases.filter(c => c.status === "done").length;
+  const fail = cases.filter(c => c.status === "fail").length;
+  return (
+    <div className="px-6 pb-5">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-gray-600">케이스별 결과 ({cases.length}개)</p>
+        <div className="flex gap-2 text-xs">
+          <span className="text-green-600 font-medium">✓ {done}개 통과</span>
+          {fail > 0 && <span className="text-red-500 font-medium">✗ {fail}개 실패</span>}
+          {cases.length - done - fail > 0 && <span className="text-yellow-500 font-medium">⏱ {cases.length - done - fail}개 미완료</span>}
+        </div>
+      </div>
+      <div className="space-y-1.5 max-h-64 overflow-y-auto">
+        {cases.map((c) => {
+          const dot = c.status === "done" ? "bg-green-500" : c.status === "fail" ? "bg-red-500" : c.status === "running" ? "bg-blue-400 animate-pulse" : c.status === "max_steps" ? "bg-yellow-400" : "bg-gray-300";
+          const badge = c.status === "done" ? "bg-green-50 text-green-700 border-green-200" : c.status === "fail" ? "bg-red-50 text-red-700 border-red-200" : c.status === "max_steps" ? "bg-yellow-50 text-yellow-700 border-yellow-200" : "bg-gray-50 text-gray-500 border-gray-200";
+          const label = c.status === "done" ? "통과" : c.status === "fail" ? "실패" : c.status === "max_steps" ? "미완료" : c.status === "running" ? "실행중" : "대기";
+          return (
+            <div key={c.caseId} className="flex items-center gap-2 text-xs bg-white border border-gray-100 rounded-lg px-3 py-2">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+              <span className="font-mono text-gray-400 shrink-0 w-16">{c.caseId}</span>
+              <span className="flex-1 text-gray-700 truncate">{c.title}</span>
+              <span className="text-gray-400 shrink-0">{c.stepCount}스텝</span>
+              {c.durationMs && <span className="text-gray-400 shrink-0">{(c.durationMs / 1000).toFixed(0)}s</span>}
+              <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${badge}`}>{label}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Run Result Overview ────────────────────────────────────────
 function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, exporting }: {
   run: TargetRun;
@@ -1167,6 +1299,11 @@ function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, expor
         <p className="text-xs font-semibold text-gray-500 mb-1">AI 요약</p>
         <p className="text-sm text-gray-700 bg-white rounded-lg border border-gray-200 px-4 py-3 leading-relaxed">{result.summary}</p>
       </div>
+
+      {/* Case-by-case results table */}
+      {run.cases && run.cases.length > 0 && (
+        <CaseResultsTable cases={run.cases} />
+      )}
 
       {/* Failed steps */}
       {failedSteps.length > 0 && (
