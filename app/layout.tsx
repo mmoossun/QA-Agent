@@ -21,6 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 <a href="/chat" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Chat QA</a>
             <a href="/reports" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Reports</a>
             <a href="/dashboard" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Dashboard</a>
+            <a href="/board" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">QA Board</a>
             <ProviderSwitcher />
           </nav>
           <main className="flex-1">{children}</main>

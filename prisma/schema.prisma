@@ -5,7 +5,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -35,6 +35,8 @@ model Project {
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   testRuns TestRun[]
   agentRuns AgentRun[]
+  boards   QABoard[]
+  issues   Issue[]
 }
 
 // ─── TestRun ─────────────────────────────────────────────────
@@ -121,6 +123,86 @@ model SavedReport {
   recommendations  String   // JSON
   testedFeatures   String   // JSON
   steps            String   // JSON
+}
+
+// ─── QA Board: Issue ─────────────────────────────────────────
+// Web에서 직접 생성하거나 테스트 실행 결과에서 자동 생성되는 이슈
+model Issue {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  type        String   @default("bug")    // bug | design | content | accessibility | spec
+  severity    String   @default("minor")  // critical | major | minor | trivial
+  status      String   @default("open")   // open | in_progress | resolved | wont_fix
+  source      String   @default("web")    // web | agent | sheets | api
+  screenshotUrl String?
+  targetUrl   String?
+  stepToReproduce String?
+  expectedResult  String?
+  actualResult    String?
+  tags        String?  // JSON string[]
+  externalIds String?  // JSON { jira_id, notion_id, ... }
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projectId   String?
+  project     Project?  @relation(fields: [projectId], references: [id])
+  boardId     String?
+  board       QABoard?  @relation(fields: [boardId], references: [id])
+  comments    IssueComment[]
+  history     IssueHistory[]
+}
+
+// ─── QA Board ────────────────────────────────────────────────
+model QABoard {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  targetUrl   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projectId   String?
+  project     Project?  @relation(fields: [projectId], references: [id])
+  issues      Issue[]
+  shareLinks  SharedBoard[]
+}
+
+// ─── SharedBoard (공유 링크) ──────────────────────────────────
+model SharedBoard {
+  id           String   @id @default(cuid())
+  publicToken  String   @unique @default(cuid())
+  label        String?
+  expiresAt    DateTime?
+  viewCount    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  boardId      String
+  board        QABoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+}
+
+// ─── IssueComment ─────────────────────────────────────────────
+model IssueComment {
+  id        String   @id @default(cuid())
+  content   String
+  authorName String  @default("익명")
+  createdAt DateTime @default(now())
+
+  issueId   String
+  issue     Issue    @relation(fields: [issueId], references: [id], onDelete: Cascade)
+}
+
+// ─── IssueHistory ─────────────────────────────────────────────
+model IssueHistory {
+  id        String   @id @default(cuid())
+  field     String   // status | severity | assignee ...
+  oldValue  String?
+  newValue  String?
+  createdAt DateTime @default(now())
+
+  issueId   String
+  issue     Issue    @relation(fields: [issueId], references: [id], onDelete: Cascade)
 }
 
 // ─── ImprovementHistory ─────────────────────────────────────
