@@ -131,8 +131,9 @@ model QABoard {
   name         String
   description  String?
   targetUrl    String?
-  boardKey     String   @default("QA")   // 이슈 키 prefix (예: QA-1)
-  issueCounter Int      @default(0)      // 자동 증가 카운터
+  boardKey     String   @default("QA")
+  issueCounter Int      @default(0)
+  wipLimits    String?  // JSON: { in_progress: 3, in_review: 2 }
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -140,30 +141,49 @@ model QABoard {
   project      Project?      @relation(fields: [projectId], references: [id])
   issues       Issue[]
   shareLinks   SharedBoard[]
+  sprints      Sprint[]
+}
+
+// ─── Sprint ───────────────────────────────────────────────────
+model Sprint {
+  id        String   @id @default(cuid())
+  name      String
+  goal      String?
+  status    String   @default("planning") // planning | active | completed
+  startDate DateTime?
+  endDate   DateTime?
+  createdAt DateTime @default(now())
+
+  boardId   String
+  board     QABoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  issues    Issue[]
 }
 
 // ─── Issue ───────────────────────────────────────────────────
 model Issue {
   id              String   @id @default(cuid())
-  issueKey        String?  // 예: QA-1
+  issueKey        String?
   title           String
   description     String?
   type            String   @default("bug")      // bug | task | story | improvement | spec
   priority        String   @default("medium")   // critical | high | medium | low
   status          String   @default("todo")     // todo | in_progress | in_review | done | wont_fix
-  source          String   @default("web")      // web | agent | sheets | api
-  assignee        String?  // 담당자 이름
-  reporter        String?  // 보고자 이름
+  source          String   @default("web")
+  assignee        String?
+  reporter        String?
+  epicName        String?  // 에픽 이름
+  storyPoints     Int?     // 스토리 포인트
   screenshotUrl   String?
   targetUrl       String?
-  environment     String?  // 발생 환경 (브라우저, OS 등)
+  environment     String?
   stepToReproduce String?
   expectedResult  String?
   actualResult    String?
   tags            String?  // JSON string[]
-  externalIds     String?  // JSON { jira_id, notion_id }
+  externalIds     String?
   dueDate         DateTime?
   resolvedAt      DateTime?
+  rank            String?  // lexorank for ordering
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -171,8 +191,23 @@ model Issue {
   project         Project?       @relation(fields: [projectId], references: [id])
   boardId         String?
   board           QABoard?       @relation(fields: [boardId], references: [id])
+  sprintId        String?
+  sprint          Sprint?        @relation(fields: [sprintId], references: [id])
   comments        IssueComment[]
   history         IssueHistory[]
+  linkedFrom      IssueLink[]    @relation("linkedFrom")
+  linkedTo        IssueLink[]    @relation("linkedTo")
+}
+
+// ─── IssueLink ────────────────────────────────────────────────
+model IssueLink {
+  id         String @id @default(cuid())
+  linkType   String // blocks | duplicates | relates
+  fromId     String
+  toId       String
+  from       Issue  @relation("linkedFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to         Issue  @relation("linkedTo",   fields: [toId],   references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
 }
 
 // ─── SharedBoard (공유 링크) ──────────────────────────────────

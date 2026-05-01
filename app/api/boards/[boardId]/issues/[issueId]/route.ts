@@ -27,8 +27,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     }
 
     // 일반 수정 필드
-    for (const f of ["title", "description", "stepToReproduce", "expectedResult", "actualResult", "screenshotUrl", "targetUrl", "environment", "reporter", "dueDate"]) {
+    for (const f of ["title", "description", "stepToReproduce", "expectedResult", "actualResult", "screenshotUrl", "targetUrl", "environment", "reporter", "epicName", "storyPoints", "sprintId", "rank"]) {
       if (body[f] !== undefined) updateData[f] = body[f];
+    }
+    if (body.dueDate !== undefined) {
+      updateData.dueDate = body.dueDate ? new Date(body.dueDate) : null;
     }
 
     if (body.tags !== undefined) updateData.tags = JSON.stringify(body.tags);
