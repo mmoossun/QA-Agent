@@ -7,7 +7,8 @@ import { z } from "zod";
 import prisma from "@/lib/db/client";
 
 const SEV_MAP: Record<string, string> = {
-  critical: "critical", high: "major", medium: "minor", low: "trivial",
+  critical: "critical", high: "high", medium: "medium", low: "low",
+  major: "high", minor: "medium", trivial: "low",
 };
 
 const Schema = z.object({
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
             boardId: params.boardId,
             title: f.title,
             description: [f.description, f.rootCause ? `원인: ${f.rootCause}` : ""].filter(Boolean).join("\n\n"),
-            severity: SEV_MAP[f.severity] ?? "minor",
+            priority: SEV_MAP[f.severity] ?? "medium",
             type: "bug",
             status: "open",
             source: "agent",

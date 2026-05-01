@@ -37,7 +37,7 @@ export async function GET(_req: NextRequest, { params }: { params: { token: stri
   const issues = board.issues;
   const total = issues.length;
   const resolved = issues.filter(i => i.status === "resolved").length;
-  const criticalOpen = issues.filter(i => i.severity === "critical" && i.status !== "resolved").length;
+  const criticalOpen = issues.filter(i => i.priority === "critical" && i.status !== "done").length;
 
   return NextResponse.json({
     token: link.publicToken,
@@ -55,7 +55,7 @@ export async function GET(_req: NextRequest, { params }: { params: { token: stri
       title: i.title,
       description: i.description,
       type: i.type,
-      severity: i.severity,
+      priority: i.priority,
       status: i.status,
       screenshotUrl: i.screenshotUrl,
       targetUrl: i.targetUrl,

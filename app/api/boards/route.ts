@@ -1,7 +1,3 @@
-/**
- * GET  /api/boards        — 전체 보드 목록
- * POST /api/boards        — 보드 생성
- */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/db/client";
@@ -9,7 +5,8 @@ import prisma from "@/lib/db/client";
 const CreateSchema = z.object({
   name: z.string().min(1).max(100),
   description: z.string().optional(),
-  targetUrl: z.string().url().optional(),
+  targetUrl: z.string().optional(),
+  boardKey: z.string().min(1).max(6).default("QA").transform(s => s.toUpperCase()),
   projectId: z.string().optional(),
 });
 
@@ -18,7 +15,10 @@ export async function GET() {
     orderBy: { createdAt: "desc" },
     include: {
       _count: { select: { issues: true } },
-      shareLinks: { select: { id: true, publicToken: true, label: true, expiresAt: true, viewCount: true, createdAt: true } },
+      shareLinks: {
+        select: { id: true, publicToken: true, label: true, viewCount: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      },
     },
   });
   return NextResponse.json({ boards });
@@ -33,7 +33,12 @@ export async function POST(req: NextRequest) {
         name: data.name,
         description: data.description,
         targetUrl: data.targetUrl,
+        boardKey: data.boardKey,
         projectId: data.projectId,
+      },
+      include: {
+        _count: { select: { issues: true } },
+        shareLinks: true,
       },
     });
     return NextResponse.json({ board }, { status: 201 });

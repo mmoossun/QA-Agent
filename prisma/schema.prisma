@@ -125,48 +125,54 @@ model SavedReport {
   steps            String   // JSON
 }
 
-// ─── QA Board: Issue ─────────────────────────────────────────
-// Web에서 직접 생성하거나 테스트 실행 결과에서 자동 생성되는 이슈
+// ─── QA Board ────────────────────────────────────────────────
+model QABoard {
+  id           String   @id @default(cuid())
+  name         String
+  description  String?
+  targetUrl    String?
+  boardKey     String   @default("QA")   // 이슈 키 prefix (예: QA-1)
+  issueCounter Int      @default(0)      // 자동 증가 카운터
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  projectId    String?
+  project      Project?      @relation(fields: [projectId], references: [id])
+  issues       Issue[]
+  shareLinks   SharedBoard[]
+}
+
+// ─── Issue ───────────────────────────────────────────────────
 model Issue {
-  id          String   @id @default(cuid())
-  title       String
-  description String?
-  type        String   @default("bug")    // bug | design | content | accessibility | spec
-  severity    String   @default("minor")  // critical | major | minor | trivial
-  status      String   @default("open")   // open | in_progress | resolved | wont_fix
-  source      String   @default("web")    // web | agent | sheets | api
-  screenshotUrl String?
-  targetUrl   String?
+  id              String   @id @default(cuid())
+  issueKey        String?  // 예: QA-1
+  title           String
+  description     String?
+  type            String   @default("bug")      // bug | task | story | improvement | spec
+  priority        String   @default("medium")   // critical | high | medium | low
+  status          String   @default("todo")     // todo | in_progress | in_review | done | wont_fix
+  source          String   @default("web")      // web | agent | sheets | api
+  assignee        String?  // 담당자 이름
+  reporter        String?  // 보고자 이름
+  screenshotUrl   String?
+  targetUrl       String?
+  environment     String?  // 발생 환경 (브라우저, OS 등)
   stepToReproduce String?
   expectedResult  String?
   actualResult    String?
-  tags        String?  // JSON string[]
-  externalIds String?  // JSON { jira_id, notion_id, ... }
-  resolvedAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  tags            String?  // JSON string[]
+  externalIds     String?  // JSON { jira_id, notion_id }
+  dueDate         DateTime?
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  projectId   String?
-  project     Project?  @relation(fields: [projectId], references: [id])
-  boardId     String?
-  board       QABoard?  @relation(fields: [boardId], references: [id])
-  comments    IssueComment[]
-  history     IssueHistory[]
-}
-
-// ─── QA Board ────────────────────────────────────────────────
-model QABoard {
-  id          String   @id @default(cuid())
-  name        String
-  description String?
-  targetUrl   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  projectId   String?
-  project     Project?  @relation(fields: [projectId], references: [id])
-  issues      Issue[]
-  shareLinks  SharedBoard[]
+  projectId       String?
+  project         Project?       @relation(fields: [projectId], references: [id])
+  boardId         String?
+  board           QABoard?       @relation(fields: [boardId], references: [id])
+  comments        IssueComment[]
+  history         IssueHistory[]
 }
 
 // ─── SharedBoard (공유 링크) ──────────────────────────────────
