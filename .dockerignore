@@ -9,6 +9,11 @@ public/screenshots/
 public/reports/
 prisma/dev.db
 prisma/dev.db-journal
-scripts/
+scripts/*.ts
+scripts/evaluate*
+scripts/improve*
+scripts/run-*
+scripts/test-*
+scripts/get-google*
 *.log
 README.md
