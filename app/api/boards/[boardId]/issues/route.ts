@@ -4,7 +4,7 @@ import prisma from "@/lib/db/client";
 import { sseEmit } from "@/lib/sse";
 import { notifySlack } from "@/lib/integrations/slack";
 import { createJiraTicket } from "@/lib/integrations/jira";
-import { parseFigmaUrl, createFigmaComment, getFigmaFrameImage } from "@/lib/integrations/figma";
+import { parseFigmaUrl, createFigmaComment, getFigmaFrameImage, buildFigmaCommentBody } from "@/lib/integrations/figma";
 import { createGithubIssue } from "@/lib/integrations/github";
 
 const CreateSchema = z.object({
@@ -86,8 +86,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
           }
           // 1단계: Figma 댓글 자동 등록
           if (figma.nodeId) {
-            const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
-            const msg = `[QA Board] ${issue.issueKey} · ${priLabel[issue.priority] ?? issue.priority}\n${issue.title}${issue.description ? `\n\n${issue.description}` : ""}`;
+            const msg = buildFigmaCommentBody(issue);
             const commentId = await createFigmaComment(figma.fileKey, figma.nodeId, msg, figmaToken);
             if (commentId) {
               const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
@@ -144,9 +143,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
 
       // Figma: 보드에 figmaFileKey 설정된 경우 (이슈 targetUrl 없어도 보드 Figma 파일에 댓글)
       if (board?.figmaFileKey && !data.targetUrl) {
-        const priLabel2: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
-        const msg = `[QA Board] ${issue.issueKey} · ${priLabel2[issue.priority] ?? issue.priority}\n${issue.title}`;
-        const commentId = await createFigmaComment(board.figmaFileKey, undefined, msg, board.figmaToken);
+        const commentId = await createFigmaComment(board.figmaFileKey, undefined, buildFigmaCommentBody(issue), board.figmaToken);
         if (commentId) {
           const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
           await prisma.issue.update({

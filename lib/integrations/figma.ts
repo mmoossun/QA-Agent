@@ -6,6 +6,68 @@ const resolveToken = (boardToken?: string | null) =>
 
 // ── URL 파싱 ─────────────────────────────────────────────────────
 // https://www.figma.com/file/{key}/... or /design/{key}/...?node-id=xxx-yyy
+// Figma 코멘트용 이슈 본문 생성
+export function buildFigmaCommentBody(issue: {
+  issueKey?: string | null;
+  title: string;
+  type: string;
+  priority: string;
+  status: string;
+  assignee?: string | null;
+  reporter?: string | null;
+  epicName?: string | null;
+  storyPoints?: number | null;
+  description?: string | null;
+  stepToReproduce?: string | null;
+  expectedResult?: string | null;
+  actualResult?: string | null;
+  environment?: string | null;
+  targetUrl?: string | null;
+}): string {
+  const PRI: Record<string, string> = {
+    critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low",
+  };
+  const TYPE: Record<string, string> = {
+    bug: "🐛 버그", task: "✅ 작업", story: "📖 스토리",
+    improvement: "⚡ 개선", spec: "📋 스펙",
+  };
+
+  const lines: string[] = [
+    `[QA Board] ${issue.issueKey ?? ""}  ${TYPE[issue.type] ?? issue.type}  ${PRI[issue.priority] ?? issue.priority}`,
+    `━━━━━━━━━━━━━━━━━━━━━━━━`,
+    issue.title,
+  ];
+
+  // 메타
+  const meta: string[] = [];
+  if (issue.assignee)   meta.push(`👤 담당자: ${issue.assignee}`);
+  if (issue.reporter)   meta.push(`📝 보고자: ${issue.reporter}`);
+  if (issue.epicName)   meta.push(`🗂 에픽: ${issue.epicName}`);
+  if (issue.storyPoints != null) meta.push(`🎯 ${issue.storyPoints} SP`);
+  if (meta.length) lines.push("", meta.join("  ·  "));
+
+  if (issue.description) {
+    lines.push("", "📌 설명", issue.description);
+  }
+  if (issue.stepToReproduce) {
+    lines.push("", "🔁 재현 단계", issue.stepToReproduce);
+  }
+  if (issue.expectedResult) {
+    lines.push("", "✅ 기대 결과", issue.expectedResult);
+  }
+  if (issue.actualResult) {
+    lines.push("", "❌ 실제 결과", issue.actualResult);
+  }
+  if (issue.environment) {
+    lines.push("", `🖥 환경: ${issue.environment}`);
+  }
+  if (issue.targetUrl) {
+    lines.push("", `🔗 ${issue.targetUrl}`);
+  }
+
+  return lines.join("\n");
+}
+
 // 연결 테스트 — /v1/me 호출
 export async function testFigmaConnection(boardToken?: string | null): Promise<{ ok: boolean; name?: string }> {
   const token = resolveToken(boardToken);
