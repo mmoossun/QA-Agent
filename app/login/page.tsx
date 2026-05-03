@@ -10,6 +10,13 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
+  const [guestLoading, setGuestLoading] = useState(false);
+
+  const handleGuest = async () => {
+    setGuestLoading(true);
+    await fetch("/api/auth/guest", { method: "POST" });
+    router.push("/board");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,7 +54,16 @@ function LoginForm() {
           {loading ? "로그인 중..." : "로그인"}
         </button>
       </form>
-      <p className="text-center text-sm text-gray-500 mt-5">
+      <div className="relative my-5">
+        <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200" /></div>
+        <div className="relative flex justify-center"><span className="bg-white px-3 text-xs text-gray-400">또는</span></div>
+      </div>
+      <button onClick={handleGuest} disabled={guestLoading}
+        className="w-full border-2 border-gray-200 text-gray-600 py-3 rounded-xl font-semibold hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 transition-all text-sm">
+        {guestLoading ? "이동 중..." : "🚀 로그인 없이 시작"}
+      </button>
+      <p className="text-center text-xs text-gray-400 mt-3">계정 없이도 모든 기능을 사용할 수 있습니다</p>
+      <p className="text-center text-sm text-gray-500 mt-4">
         계정이 없으신가요?{" "}
         <Link href="/register" className="text-[#0052CC] font-bold hover:underline">회원가입</Link>
       </p>
