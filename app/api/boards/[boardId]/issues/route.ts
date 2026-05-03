@@ -70,9 +70,13 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
       const figma = parseFigmaUrl(data.targetUrl);
       if (figma) {
         (async () => { try {
+          const boardForFigma = await prisma.qABoard.findUnique({
+            where: { id: params.boardId }, select: { figmaToken: true },
+          });
+          const figmaToken = boardForFigma?.figmaToken;
           // 3단계: 스크린샷 자동 첨부 (screenshotUrl 미입력 시)
           if (!data.screenshotUrl && figma.nodeId) {
-            const imgUrl = await getFigmaFrameImage(figma.fileKey, figma.nodeId);
+            const imgUrl = await getFigmaFrameImage(figma.fileKey, figma.nodeId, figmaToken);
             if (imgUrl) {
               await prisma.issue.update({
                 where: { id: issue.id },
@@ -84,7 +88,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
           if (figma.nodeId) {
             const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
             const msg = `[QA Board] ${issue.issueKey} · ${priLabel[issue.priority] ?? issue.priority}\n${issue.title}${issue.description ? `\n\n${issue.description}` : ""}`;
-            const commentId = await createFigmaComment(figma.fileKey, figma.nodeId, msg);
+            const commentId = await createFigmaComment(figma.fileKey, figma.nodeId, msg, figmaToken);
             if (commentId) {
               const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
               await prisma.issue.update({
@@ -110,7 +114,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
     ;(async () => { try {
       const board = await prisma.qABoard.findUnique({
         where: { id: params.boardId },
-        select: { githubOwner: true, githubRepo: true, githubToken: true, figmaFileKey: true },
+        select: { githubOwner: true, githubRepo: true, githubToken: true, figmaFileKey: true, figmaToken: true },
       });
       if (board?.githubOwner && board.githubRepo && board.githubToken) {
         const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
@@ -142,7 +146,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
       if (board?.figmaFileKey && !data.targetUrl) {
         const priLabel2: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
         const msg = `[QA Board] ${issue.issueKey} · ${priLabel2[issue.priority] ?? issue.priority}\n${issue.title}`;
-        const commentId = await createFigmaComment(board.figmaFileKey, undefined, msg);
+        const commentId = await createFigmaComment(board.figmaFileKey, undefined, msg, board.figmaToken);
         if (commentId) {
           const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
           await prisma.issue.update({

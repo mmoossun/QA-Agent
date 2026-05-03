@@ -1,26 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db/client";
-import { parseFigmaUrl } from "@/lib/integrations/figma";
+import { parseFigmaUrl, testFigmaConnection } from "@/lib/integrations/figma";
 import { testGithubConnection } from "@/lib/integrations/github";
 
 export async function GET(_req: NextRequest, { params }: { params: { boardId: string } }) {
   const board = await prisma.qABoard.findUnique({
     where: { id: params.boardId },
     select: {
-      figmaFileKey: true, figmaFileUrl: true,
-      githubOwner: true, githubRepo: true,
-      githubToken: true,
+      figmaFileKey: true, figmaFileUrl: true, figmaToken: true,
+      githubOwner: true, githubRepo: true, githubToken: true,
     },
   });
   if (!board) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   return NextResponse.json({
-    figmaFileKey: board.figmaFileKey,
-    figmaFileUrl: board.figmaFileUrl,
-    githubOwner:  board.githubOwner,
-    githubRepo:   board.githubRepo,
-    // 토큰은 마스킹
-    githubToken:  board.githubToken ? board.githubToken.slice(0, 4) + "…" + board.githubToken.slice(-4) : null,
+    figmaFileKey:  board.figmaFileKey,
+    figmaFileUrl:  board.figmaFileUrl,
+    hasFigmaToken: !!(board as Record<string, unknown>).figmaToken,
+    githubOwner:   board.githubOwner,
+    githubRepo:    board.githubRepo,
     hasGithubToken: !!board.githubToken,
   });
 }
@@ -41,6 +39,7 @@ export async function PUT(req: NextRequest, { params }: { params: { boardId: str
       update.figmaFileKey = null;
     }
   }
+  if ("figmaToken" in body) update.figmaToken = body.figmaToken || null;
 
   // GitHub 설정
   if ("githubOwner"  in body) update.githubOwner  = body.githubOwner  || null;
@@ -57,6 +56,15 @@ export async function PUT(req: NextRequest, { params }: { params: { boardId: str
 // GitHub 연결 테스트
 export async function POST(req: NextRequest, { params }: { params: { boardId: string } }) {
   const { action } = await req.json();
+
+  if (action === "test-figma") {
+    const board = await prisma.qABoard.findUnique({
+      where: { id: params.boardId },
+      select: { figmaToken: true },
+    });
+    const result = await testFigmaConnection(board?.figmaToken);
+    return NextResponse.json(result);
+  }
 
   if (action === "test-github") {
     const board = await prisma.qABoard.findUnique({

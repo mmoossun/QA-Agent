@@ -30,7 +30,7 @@ interface ShareLink { id: string; publicToken: string; label?: string; viewCount
 interface Board {
   id: string; name: string; description?: string; targetUrl?: string;
   boardKey: string; issueCounter: number; wipLimits?: string;
-  figmaFileKey?: string; figmaFileUrl?: string;
+  figmaFileKey?: string; figmaFileUrl?: string; hasFigmaToken?: boolean;
   githubOwner?: string; githubRepo?: string; hasGithubToken?: boolean;
   createdAt: string; _count: { issues: number }; shareLinks: ShareLink[];
 }
@@ -918,43 +918,125 @@ function DetailPanel({ issue, boardId, allIssues, onClose, onStatusChange, onDel
 
 // ─── Create Board Modal ───────────────────────────────────────
 function CreateBoardModal({ onClose, onCreated }: { onClose: () => void; onCreated: (b: Board) => void }) {
-  const [name, setName] = useState(""); const [key, setKey] = useState("QA"); const [desc, setDesc] = useState(""); const [url, setUrl] = useState("");
-  const [saving, setSaving] = useState(false); const [error, setError] = useState("");
+  const [name, setName]           = useState("");
+  const [key,  setKey]            = useState("QA");
+  const [desc, setDesc]           = useState("");
+  const [url,  setUrl]            = useState("");
+  const [showIntegration, setShowIntegration] = useState(false);
+  // Figma
+  const [figmaUrl,   setFigmaUrl]   = useState("");
+  const [figmaToken, setFigmaToken] = useState("");
+  // GitHub
+  const [ghOwner, setGhOwner] = useState("");
+  const [ghRepo,  setGhRepo]  = useState("");
+  const [ghToken, setGhToken] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); if (!name.trim()) { setError("이름을 입력하세요."); return; }
     setSaving(true); setError("");
     try {
-      const d = await jpost("/api/boards", { name, boardKey: key.toUpperCase() || "QA", description: desc || undefined, targetUrl: url || undefined }) as { board?: Board; error?: string };
+      const d = await jpost("/api/boards", {
+        name, boardKey: key.toUpperCase() || "QA",
+        description: desc || undefined, targetUrl: url || undefined,
+      }) as { board?: Board; error?: string };
       if (d.error) { setError(d.error); setSaving(false); return; }
-      if (d.board) onCreated(d.board);
+      if (d.board) {
+        // 연동 설정이 있으면 settings API로 저장
+        if (figmaUrl || figmaToken || ghOwner || ghRepo || ghToken) {
+          await jpatch(`/api/boards/${d.board.id}/settings`, {
+            ...(figmaUrl   ? { figmaFileUrl: figmaUrl }   : {}),
+            ...(figmaToken ? { figmaToken }               : {}),
+            ...(ghOwner    ? { githubOwner: ghOwner }     : {}),
+            ...(ghRepo     ? { githubRepo:  ghRepo }      : {}),
+            ...(ghToken    ? { githubToken: ghToken }     : {}),
+          });
+        }
+        onCreated(d.board);
+      }
     } catch (err) { setError(String(err)); setSaving(false); }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
-        <div className="px-6 py-5 border-b flex items-center justify-between"><h2 className="text-lg font-black text-gray-800">새 QA 보드</h2><button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button></div>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg my-4" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b flex items-center justify-between">
+          <h2 className="text-lg font-black text-gray-800">새 QA 보드</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
         <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
           {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 rounded-xl">{error}</div>}
-          <div><label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">보드 이름 *</label>
+
+          {/* 기본 정보 */}
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">보드 이름 *</label>
             <input value={name} onChange={e => setName(e.target.value)} required autoFocus placeholder="예: 회원가입 QA"
-              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
-          <div><label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">이슈 키</label>
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">이슈 키</label>
             <div className="flex items-center gap-3">
               <input value={key} onChange={e => setKey(e.target.value.toUpperCase().replace(/[^A-Z]/g, ""))} maxLength={6} placeholder="QA"
                 className="w-20 border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono font-black text-[#0052CC] focus:outline-none focus:ring-2 focus:ring-blue-400" />
               <span className="text-xs text-gray-400">이슈: <strong className="text-[#0052CC] font-mono">{key||"QA"}-1</strong>, <strong className="text-[#0052CC] font-mono">{key||"QA"}-2</strong>…</span>
-            </div></div>
-          <div><label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">설명</label>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">설명</label>
             <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="보드 설명"
-              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
-          <div><label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">대상 URL</label>
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">대상 URL</label>
             <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://example.com"
-              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          </div>
+
+          {/* 연동 설정 토글 */}
+          <button type="button" onClick={() => setShowIntegration(p => !p)}
+            className="w-full text-xs font-bold py-2 border border-dashed border-gray-300 rounded-xl text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors">
+            {showIntegration ? "▲ 연동 설정 접기" : "▼ Figma / GitHub 연동 설정 (선택)"}
+          </button>
+
+          {showIntegration && (
+            <div className="space-y-4 border border-gray-100 rounded-2xl p-4 bg-gray-50">
+              {/* Figma */}
+              <div>
+                <p className="text-xs font-black text-purple-700 mb-2">🎨 Figma 연동</p>
+                <div className="space-y-2">
+                  <input value={figmaUrl} onChange={e => setFigmaUrl(e.target.value)}
+                    placeholder="Figma 파일 URL (https://www.figma.com/file/...)"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 bg-white" />
+                  <input type="password" value={figmaToken} onChange={e => setFigmaToken(e.target.value)}
+                    placeholder="Figma Personal Access Token (figd_...)"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 bg-white" />
+                </div>
+              </div>
+              <div className="border-t border-gray-200" />
+              {/* GitHub */}
+              <div>
+                <p className="text-xs font-black text-gray-700 mb-2">🐙 GitHub 연동</p>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={ghOwner} onChange={e => setGhOwner(e.target.value)} placeholder="Owner (예: mmoossun)"
+                      className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white" />
+                    <input value={ghRepo} onChange={e => setGhRepo(e.target.value)} placeholder="Repo (예: my-app)"
+                      className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white" />
+                  </div>
+                  <input type="password" value={ghToken} onChange={e => setGhToken(e.target.value)}
+                    placeholder="GitHub Personal Access Token (ghp_...)"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white" />
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-gray-50">취소</button>
-            <button type="submit" disabled={saving} className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-black hover:bg-blue-700 disabled:opacity-50">{saving ? "생성 중..." : "보드 만들기"}</button>
+            <button type="submit" disabled={saving} className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-black hover:bg-blue-700 disabled:opacity-50">
+              {saving ? "생성 중..." : "보드 만들기"}
+            </button>
           </div>
         </form>
       </div>
@@ -1250,19 +1332,23 @@ function ShareModal({ board, onCopy, onCreated, onClose }: { board: Board; onCop
 // ─── Board Settings Modal (Figma + GitHub 연동) ───────────────
 function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose: () => void; onSaved: () => void }) {
   const [tab, setTab] = useState<"figma" | "github">("figma");
-  const [figmaUrl, setFigmaUrl]   = useState(board.figmaFileUrl ?? "");
-  const [ghOwner,  setGhOwner]    = useState(board.githubOwner  ?? "");
-  const [ghRepo,   setGhRepo]     = useState(board.githubRepo   ?? "");
-  const [ghToken,  setGhToken]    = useState("");
-  const [saving,   setSaving]     = useState(false);
-  const [testing,  setTesting]    = useState(false);
-  const [testMsg,  setTestMsg]    = useState("");
-  const [saved,    setSavedMsg]   = useState("");
+  const [figmaUrl,   setFigmaUrl]   = useState(board.figmaFileUrl ?? "");
+  const [figmaToken, setFigmaToken] = useState("");
+  const [ghOwner,    setGhOwner]    = useState(board.githubOwner  ?? "");
+  const [ghRepo,     setGhRepo]     = useState(board.githubRepo   ?? "");
+  const [ghToken,    setGhToken]    = useState("");
+  const [saving,   setSaving]   = useState(false);
+  const [testing,  setTesting]  = useState(false);
+  const [testMsg,  setTestMsg]  = useState("");
+  const [saved,    setSavedMsg] = useState("");
 
   const handleSave = async () => {
-    setSaving(true); setSavedMsg("");
+    setSaving(true); setSavedMsg(""); setTestMsg("");
     const body: Record<string, string> = {};
-    if (tab === "figma") body.figmaFileUrl = figmaUrl;
+    if (tab === "figma") {
+      body.figmaFileUrl = figmaUrl;
+      if (figmaToken) body.figmaToken = figmaToken;
+    }
     if (tab === "github") {
       body.githubOwner = ghOwner;
       body.githubRepo  = ghRepo;
@@ -1273,11 +1359,16 @@ function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose
     setTimeout(() => { setSavedMsg(""); onSaved(); }, 1200);
   };
 
-  const handleTestGithub = async () => {
+  const handleTest = async () => {
     setTesting(true); setTestMsg("");
-    const d = await jpost(`/api/boards/${board.id}/settings`, { action: "test-github" }) as { ok: boolean; repoName?: string; error?: string };
+    if (tab === "figma") {
+      const d = await jpost(`/api/boards/${board.id}/settings`, { action: "test-figma" }) as { ok: boolean; name?: string };
+      setTestMsg(d.ok ? `✅ 연결 성공${d.name ? `: @${d.name}` : ""}` : "❌ 연결 실패 — 토큰을 확인하세요");
+    } else {
+      const d = await jpost(`/api/boards/${board.id}/settings`, { action: "test-github" }) as { ok: boolean; repoName?: string; error?: string };
+      setTestMsg(d.ok ? `✅ 연결 성공: ${d.repoName}` : `❌ 연결 실패: ${d.error ?? "토큰/레포를 확인하세요"}`);
+    }
     setTesting(false);
-    setTestMsg(d.ok ? `✅ 연결 성공: ${d.repoName}` : `❌ 연결 실패: ${d.error ?? "토큰/레포를 확인하세요"}`);
   };
 
   return (
@@ -1307,20 +1398,41 @@ function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose
           {tab === "figma" && (
             <>
               <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs text-purple-700">
-                <strong>Figma 파일 URL</strong>을 연결하면 이슈 생성 시 Figma 파일에 댓글이 자동으로 등록됩니다.
+                Figma 파일 URL + Personal Access Token을 연결하면 이슈 생성 시 댓글이 자동 등록됩니다.
               </div>
               <div>
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">Figma 파일 URL</label>
                 <input value={figmaUrl} onChange={e => setFigmaUrl(e.target.value)}
                   placeholder="https://www.figma.com/file/AbcXXX/프로젝트명"
                   className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400" />
-                <p className="text-xs text-gray-400 mt-1">파일 URL만 입력 (node-id 불필요). 이슈에 Figma URL 있으면 프레임에, 없으면 파일 레벨에 댓글 등록.</p>
+                <p className="text-xs text-gray-400 mt-1">파일 URL만 입력 (node-id 불필요)</p>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">
+                  Personal Access Token
+                  {board.hasFigmaToken && <span className="ml-2 text-green-600 font-normal normal-case">✅ 저장됨 (변경 시만 입력)</span>}
+                </label>
+                <input type="password" value={figmaToken} onChange={e => setFigmaToken(e.target.value)}
+                  placeholder={board.hasFigmaToken ? "변경하려면 새 토큰 입력" : "figd_xxxxxxxxxxxx"}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400" />
+                <p className="text-xs text-gray-400 mt-1">
+                  Figma → Settings → Security → <strong>Personal access tokens</strong>에서 발급
+                </p>
               </div>
               {board.figmaFileKey && (
                 <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-xs text-green-700">
                   ✅ 연결된 Figma 파일 키: <code className="font-mono font-bold">{board.figmaFileKey}</code>
                 </div>
               )}
+              {testMsg && (
+                <div className={`text-xs px-3 py-2 rounded-xl ${testMsg.startsWith("✅") ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                  {testMsg}
+                </div>
+              )}
+              <button onClick={handleTest} disabled={testing}
+                className="w-full border border-purple-200 text-purple-700 py-2 rounded-xl text-sm font-semibold hover:bg-purple-50 disabled:opacity-50">
+                {testing ? "연결 테스트 중..." : "🎨 Figma 연결 테스트"}
+              </button>
             </>
           )}
 
@@ -1358,7 +1470,7 @@ function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose
                   {testMsg}
                 </div>
               )}
-              <button onClick={handleTestGithub} disabled={testing}
+              <button onClick={handleTest} disabled={testing}
                 className="w-full border border-gray-300 text-gray-700 py-2 rounded-xl text-sm font-semibold hover:bg-gray-50 disabled:opacity-50">
                 {testing ? "연결 테스트 중..." : "🔌 GitHub 연결 테스트"}
               </button>

@@ -194,6 +194,7 @@ model QABoard {
   // Figma 보드 단위 연동
   figmaFileKey String?  // Figma 파일 키 (URL에서 파싱)
   figmaFileUrl String?  // 원본 Figma 파일 URL
+  figmaToken   String?  // Figma Personal Access Token (보드별)
   // GitHub 보드 단위 연동
   githubOwner  String?  // 레포 소유자 (예: mmoossun)
   githubRepo   String?  // 레포 이름 (예: my-app)

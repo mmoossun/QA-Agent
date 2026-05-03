@@ -1,8 +1,23 @@
-const BASE  = "https://api.figma.com/v1";
-const TOKEN = () => process.env.FIGMA_ACCESS_TOKEN ?? "";
+const BASE = "https://api.figma.com/v1";
+
+// 보드별 토큰 우선, 없으면 환경변수 사용
+const resolveToken = (boardToken?: string | null) =>
+  boardToken?.trim() || process.env.FIGMA_ACCESS_TOKEN || "";
 
 // ── URL 파싱 ─────────────────────────────────────────────────────
 // https://www.figma.com/file/{key}/... or /design/{key}/...?node-id=xxx-yyy
+// 연결 테스트 — /v1/me 호출
+export async function testFigmaConnection(boardToken?: string | null): Promise<{ ok: boolean; name?: string }> {
+  const token = resolveToken(boardToken);
+  if (!token) return { ok: false };
+  try {
+    const res = await fetch(`${BASE}/me`, { headers: { "X-Figma-Token": token } });
+    if (!res.ok) return { ok: false };
+    const d = await res.json() as { handle?: string; email?: string };
+    return { ok: true, name: d.handle ?? d.email };
+  } catch { return { ok: false }; }
+}
+
 export function parseFigmaUrl(url: string): { fileKey: string; nodeId?: string } | null {
   try {
     const u = new URL(url);
@@ -21,8 +36,9 @@ export async function createFigmaComment(
   fileKey: string,
   nodeId: string | undefined,
   message: string,
+  boardToken?: string | null,
 ): Promise<string | null> {
-  const token = TOKEN();
+  const token = resolveToken(boardToken);
   if (!token) return null;
   try {
     const body: Record<string, unknown> = { message };
@@ -41,8 +57,8 @@ export async function createFigmaComment(
 }
 
 // ── 2단계: 이슈 해결 시 Figma 댓글 삭제(resolved) ───────────────
-export async function deleteFigmaComment(fileKey: string, commentId: string): Promise<boolean> {
-  const token = TOKEN();
+export async function deleteFigmaComment(fileKey: string, commentId: string, boardToken?: string | null): Promise<boolean> {
+  const token = resolveToken(boardToken);
   if (!token) return false;
   try {
     const res = await fetch(`${BASE}/files/${fileKey}/comments/${commentId}`, {
@@ -54,8 +70,8 @@ export async function deleteFigmaComment(fileKey: string, commentId: string): Pr
 }
 
 // ── 3단계: Figma 프레임 스크린샷 URL 가져오기 ───────────────────
-export async function getFigmaFrameImage(fileKey: string, nodeId: string): Promise<string | null> {
-  const token = TOKEN();
+export async function getFigmaFrameImage(fileKey: string, nodeId: string, boardToken?: string | null): Promise<string | null> {
+  const token = resolveToken(boardToken);
   if (!token) return null;
   try {
     // API의 ids 파라미터: URL 형식(대시) 사용
