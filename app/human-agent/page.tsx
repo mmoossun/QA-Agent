@@ -1069,7 +1069,7 @@ export default function HumanAgentPage() {
               {/* Report view */}
               {activeRun && reportView === "report" && (
                 activeTab && reports[activeTab]
-                  ? <ReportView report={reports[activeTab]} onViewSteps={() => setReportView("steps")} />
+                  ? <ReportView report={reports[activeTab]} run={activeRun} onViewSteps={() => setReportView("steps")} />
                   : <div className="flex flex-col items-center justify-center h-64 text-gray-400 gap-3">
                       <span className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
                       <p className="text-sm">AI 리포트 생성 중…</p>
@@ -1258,8 +1258,10 @@ function QABoardImportModal({ run, report, onClose }: {
       title: f.title,
       description: f.description,
       severity: f.severity as string,
-      rootCause: f.rootCause,
-      reproductionSteps: f.reproductionSteps,
+      rootCause: f.rootCause ?? "",
+      reproductionSteps: Array.isArray(f.reproductionSteps)
+        ? (f.reproductionSteps as string[]).join("\n")
+        : (f.reproductionSteps ?? ""),
       recommendation: f.recommendation,
       screenshotPath: f.screenshotPath,
       source: "AI 리포트",
@@ -1611,10 +1613,11 @@ const SEVERITY_CONFIG: Record<string, { label: string; dot: string; text: string
 };
 const FINDING_TYPE_ICON: Record<string, string> = { bug: "🐛", warning: "⚠️", info: "ℹ️" };
 
-function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: () => void }) {
+function ReportView({ report, run, onViewSteps }: { report: TestReport; run?: TargetRun; onViewSteps: () => void }) {
   const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [downloading, setDownloading] = useState<"html" | "json" | null>(null);
+  const [showBoardModal, setShowBoardModal] = useState(false);
   const risk = RISK_CONFIG[report.riskLevel] ?? RISK_CONFIG.medium;
   const statusIcon = report.status === "done" ? "✅" : report.status === "fail" ? "❌" : "⏱";
   const bugs = report.findings.filter(f => f.type === "bug");
@@ -1712,6 +1715,12 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
                   <>💾 리포트 저장</>
                 )}
               </button>
+              {report.findings.length > 0 && (
+                <button onClick={() => setShowBoardModal(true)}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0052CC] hover:bg-blue-700 text-white transition-colors">
+                  📋 QA 보드에 추가
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1869,6 +1878,17 @@ function ReportView({ report, onViewSteps }: { report: TestReport; onViewSteps: 
         </div>
       </div>
 
+      {/* QA Board Import Modal (리포트 탭) */}
+      {showBoardModal && run && (
+        <QABoardImportModal run={run} report={report} onClose={() => setShowBoardModal(false)} />
+      )}
+      {showBoardModal && !run && (
+        <QABoardImportModal
+          run={{ target: { id: "r", label: report.targetUrl, url: report.targetUrl, loginEmail: "", loginPassword: "", enabled: true }, steps: report.steps ?? [], result: null, status: "done" }}
+          report={report}
+          onClose={() => setShowBoardModal(false)}
+        />
+      )}
     </div>
   );
 }
