@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import * as XLSX from "xlsx";
 import type { HumanStep, HumanAgentResult } from "@/lib/human-agent/runner";
 import type { TestReport } from "@/lib/human-agent/report-generator";
@@ -1056,6 +1056,7 @@ export default function HumanAgentPage() {
                   {activeRun.result && !running && (
                     <RunResultOverview
                       run={activeRun}
+                      report={activeTab ? reports[activeTab] : undefined}
                       onRerun={() => { setRuns([]); setReports({}); startRun(); }}
                       onExportToSheets={sheetId ? () => exportRunToSheets(activeRun) : undefined}
                       exportStatus={runExportStatus}
@@ -1237,14 +1238,182 @@ function CaseResultsTable({ cases }: { cases: CaseProgress[] }) {
   );
 }
 
-// ─── Run Result Overview ────────────────────────────────────────
-function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, exporting }: {
+// ─── QA Board Import Modal ──────────────────────────────────────
+function QABoardImportModal({ run, report, onClose }: {
   run: TargetRun;
+  report?: import("@/lib/human-agent/report-generator").TestReport;
+  onClose: () => void;
+}) {
+  const [boards, setBoards] = useState<{ id: string; name: string; boardKey: string }[]>([]);
+  const [boardId, setBoardId] = useState("");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [importing, setImporting] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState("");
+
+  // findings 목록 구성: 리포트 findings + 실패 스텝
+  const candidates = [
+    ...(report?.findings ?? []).map((f, i) => ({
+      key: `finding-${i}`,
+      title: f.title,
+      description: f.description,
+      severity: f.severity as string,
+      rootCause: f.rootCause,
+      reproductionSteps: f.reproductionSteps,
+      recommendation: f.recommendation,
+      screenshotPath: f.screenshotPath,
+      source: "AI 리포트",
+    })),
+    ...run.steps.filter(s => !s.success).map((s, i) => ({
+      key: `step-${i}`,
+      title: `Step ${s.stepNumber} 실패: ${s.decision.description.slice(0, 80)}`,
+      description: s.error ?? "실행 실패",
+      severity: "medium",
+      rootCause: s.error ?? "",
+      reproductionSteps: `Step ${s.stepNumber}: [${s.decision.action}] ${s.decision.description}`,
+      recommendation: "",
+      screenshotPath: s.screenshotPath,
+      source: "실패 스텝",
+    })),
+  ];
+
+  useEffect(() => {
+    fetch("/api/boards").then(r => r.json()).then(d => {
+      const bs = d.boards ?? [];
+      setBoards(bs);
+      if (bs.length > 0) setBoardId(bs[0].id);
+    }).catch(() => {});
+    // 전체 선택으로 시작
+    setSelected(new Set(candidates.map((_, i) => i)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggle = (i: number) => setSelected(p => { const n = new Set(p); n.has(i) ? n.delete(i) : n.add(i); return n; });
+  const toggleAll = () => setSelected(selected.size === candidates.length ? new Set() : new Set(candidates.map((_, i) => i)));
+
+  const handleImport = async () => {
+    if (!boardId || selected.size === 0) return;
+    setImporting(true); setError("");
+    const findings = Array.from(selected).map(i => candidates[i]);
+    const res = await fetch(`/api/boards/${boardId}/issues/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ findings }),
+    }).then(r => r.json());
+    if (res.error) { setError(res.error); setImporting(false); }
+    else { setDone(true); setImporting(false); }
+  };
+
+  const SEV_ICON: Record<string, string> = { critical: "⛔", high: "🔴", medium: "🟡", low: "🔵" };
+
+  if (done) return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-8 text-center">
+        <div className="text-5xl mb-4">✅</div>
+        <h2 className="text-xl font-black text-gray-800 mb-2">{selected.size}개 이슈 추가 완료</h2>
+        <p className="text-gray-500 text-sm mb-6">QA 보드에서 확인하세요</p>
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm hover:bg-gray-50">닫기</button>
+          <a href="/board" className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-bold text-center hover:bg-blue-700">QA 보드 보기</a>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b flex items-center justify-between shrink-0">
+          <div>
+            <h2 className="text-base font-black text-gray-800">QA 보드에 이슈 추가</h2>
+            <p className="text-xs text-gray-400 mt-0.5">{run.target.label} · {run.target.url}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
+
+        <div className="px-6 py-4 border-b shrink-0 space-y-3">
+          {/* 보드 선택 */}
+          <div>
+            <label className="text-xs font-bold text-gray-600 uppercase tracking-wide">추가할 보드</label>
+            {boards.length === 0
+              ? <div className="mt-1 flex items-center gap-2">
+                  <p className="text-sm text-gray-400">보드가 없습니다.</p>
+                  <a href="/board" className="text-sm text-[#0052CC] hover:underline font-semibold">보드 만들기 →</a>
+                </div>
+              : <select value={boardId} onChange={e => setBoardId(e.target.value)}
+                  className="mt-1 w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+                  {boards.map(b => <option key={b.id} value={b.id}>[{b.boardKey}] {b.name}</option>)}
+                </select>
+            }
+          </div>
+          {/* 전체 선택 */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">{candidates.length}개 항목 · {selected.size}개 선택됨</span>
+            <button onClick={toggleAll} className="text-xs text-[#0052CC] hover:underline font-semibold">
+              {selected.size === candidates.length ? "전체 해제" : "전체 선택"}
+            </button>
+          </div>
+        </div>
+
+        {/* 항목 목록 */}
+        <div className="flex-1 overflow-y-auto px-6 py-3 space-y-2">
+          {candidates.length === 0 && (
+            <div className="text-center py-12 text-gray-400">
+              <p className="text-3xl mb-2">📭</p>
+              <p className="text-sm">선택할 수 있는 항목이 없습니다</p>
+              <p className="text-xs mt-1">AI 리포트가 생성되거나 실패한 스텝이 있을 때 나타납니다</p>
+            </div>
+          )}
+          {candidates.map((c, i) => (
+            <label key={c.key} onClick={() => toggle(i)}
+              className={`flex items-start gap-3 p-3 border rounded-xl cursor-pointer transition-all ${selected.has(i) ? "border-[#0052CC] bg-blue-50" : "border-gray-200 hover:border-gray-300 bg-white"}`}>
+              <input type="checkbox" checked={selected.has(i)} onChange={() => toggle(i)} className="mt-0.5 accent-blue-600 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-xs">{SEV_ICON[c.severity] ?? "🟡"}</span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${c.source === "AI 리포트" ? "bg-purple-100 text-purple-700" : "bg-red-100 text-red-700"}`}>
+                    {c.source}
+                  </span>
+                  <span className="text-[10px] text-gray-400 capitalize">{c.severity}</span>
+                </div>
+                <p className="text-sm font-semibold text-gray-800 line-clamp-1">{c.title}</p>
+                {c.description && <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{c.description}</p>}
+                {c.screenshotPath && (
+                  <div className="mt-1.5 rounded-lg overflow-hidden border border-gray-200 w-24 h-14">
+                    <img src={c.screenshotPath} alt="" className="w-full h-full object-cover object-top" />
+                  </div>
+                )}
+              </div>
+            </label>
+          ))}
+        </div>
+
+        {/* 하단 */}
+        <div className="px-6 py-4 border-t bg-gray-50 shrink-0">
+          {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-white">취소</button>
+            <button onClick={handleImport} disabled={importing || selected.size === 0 || !boardId}
+              className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-black hover:bg-blue-700 disabled:opacity-40">
+              {importing ? "추가 중..." : `${selected.size}개 이슈 추가`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Run Result Overview ────────────────────────────────────────
+function RunResultOverview({ run, report, onRerun, onExportToSheets, exportStatus, exporting }: {
+  run: TargetRun;
+  report?: import("@/lib/human-agent/report-generator").TestReport;
   onRerun: () => void;
   onExportToSheets?: () => void;
   exportStatus?: string | null;
   exporting?: boolean;
 }) {
+  const [showBoardModal, setShowBoardModal] = useState(false);
   const { result, steps, target } = run;
   if (!result) return null;
 
@@ -1272,10 +1441,16 @@ function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, expor
             <p className="text-xs opacity-70 mt-0.5">{target.label} · {target.url}</p>
           </div>
         </div>
-        <button onClick={onRerun}
-          className="px-4 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors shadow-sm">
-          🔄 다시 실행
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => setShowBoardModal(true)}
+            className="px-4 py-2 bg-[#0052CC] rounded-lg text-sm font-bold text-white hover:bg-blue-700 transition-colors shadow-sm">
+            📋 QA 보드에 추가
+          </button>
+          <button onClick={onRerun}
+            className="px-4 py-2 bg-white rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors shadow-sm">
+            🔄 다시 실행
+          </button>
+        </div>
       </div>
 
       {/* Metrics */}
@@ -1348,6 +1523,15 @@ function RunResultOverview({ run, onRerun, onExportToSheets, exportStatus, expor
       <div className="px-6 pb-4">
         <p className="text-xs text-gray-400">✓ 결과가 대시보드에 자동 저장되었습니다</p>
       </div>
+
+      {/* QA Board Import Modal */}
+      {showBoardModal && (
+        <QABoardImportModal
+          run={run}
+          report={report}
+          onClose={() => setShowBoardModal(false)}
+        />
+      )}
     </div>
   );
 }
