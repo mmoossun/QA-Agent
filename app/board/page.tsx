@@ -1434,19 +1434,25 @@ function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose
 
   const handleSave = async () => {
     setSaving(true); setSavedMsg(""); setTestMsg("");
-    const body: Record<string, string> = {};
-    if (tab === "figma") {
-      body.figmaFileUrl = figmaUrl;
-      if (figmaToken) body.figmaToken = figmaToken;
+    try {
+      const body: Record<string, string> = {};
+      if (tab === "figma") {
+        body.figmaFileUrl = figmaUrl;
+        if (figmaToken) body.figmaToken = figmaToken;
+      }
+      if (tab === "github") {
+        body.githubOwner = ghOwner;
+        body.githubRepo  = ghRepo;
+        if (ghToken) body.githubToken = ghToken;
+      }
+      await jpatch(`/api/boards/${board.id}/settings`, body);
+      setSavedMsg("✅ 저장됐습니다");
+      setTimeout(() => { setSavedMsg(""); onSaved(); }, 1200);
+    } catch (e) {
+      setSavedMsg(`❌ 저장 실패: ${String(e)}`);
+    } finally {
+      setSaving(false);
     }
-    if (tab === "github") {
-      body.githubOwner = ghOwner;
-      body.githubRepo  = ghRepo;
-      if (ghToken) body.githubToken = ghToken;
-    }
-    await jpatch(`/api/boards/${board.id}/settings`, body);
-    setSaving(false); setSavedMsg("✅ 저장됐습니다");
-    setTimeout(() => { setSavedMsg(""); onSaved(); }, 1200);
   };
 
   const handleTest = async () => {

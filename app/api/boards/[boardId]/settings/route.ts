@@ -23,7 +23,7 @@ export async function GET(_req: NextRequest, { params }: { params: { boardId: st
   });
 }
 
-export async function PUT(req: NextRequest, { params }: { params: { boardId: string } }) {
+async function updateSettings(req: NextRequest, { params }: { params: { boardId: string } }) {
   const body = await req.json();
   const update: Record<string, string | null> = {};
 
@@ -53,7 +53,10 @@ export async function PUT(req: NextRequest, { params }: { params: { boardId: str
   return NextResponse.json({ ok: true, board });
 }
 
-// GitHub 연결 테스트
+// PUT과 PATCH 모두 동일한 핸들러 사용
+export { updateSettings as PUT, updateSettings as PATCH };
+
+// 연결 테스트
 export async function POST(req: NextRequest, { params }: { params: { boardId: string } }) {
   const { action } = await req.json();
 
