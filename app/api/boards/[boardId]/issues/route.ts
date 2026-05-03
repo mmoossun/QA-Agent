@@ -69,7 +69,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
     if (data.targetUrl) {
       const figma = parseFigmaUrl(data.targetUrl);
       if (figma) {
-        (async () => {
+        (async () => { try {
           // 3단계: 스크린샷 자동 첨부 (screenshotUrl 미입력 시)
           if (!data.screenshotUrl && figma.nodeId) {
             const imgUrl = await getFigmaFrameImage(figma.fileKey, figma.nodeId);
@@ -93,7 +93,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
               });
             }
           }
-        })();
+        } catch (e) { console.warn("[figma] targetUrl integration error:", e); } })();
       }
     }
 
@@ -106,8 +106,8 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
     ]);
     createJiraTicket(params.boardId, { title: issue.title, description: issue.description ?? undefined, priority: issue.priority, type: issue.type });
 
-    // GitHub 이슈 자동 생성
-    ;(async () => {
+    // GitHub / Figma 보드 단위 연동 (비동기, 응답 지연 없음)
+    ;(async () => { try {
       const board = await prisma.qABoard.findUnique({
         where: { id: params.boardId },
         select: { githubOwner: true, githubRepo: true, githubToken: true, figmaFileKey: true },
@@ -151,7 +151,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
           });
         }
       }
-    })();
+    } catch (e) { console.warn("[background] board integration error:", e); } })();
 
     return NextResponse.json({ issue }, { status: 201 });
   } catch (e) {
