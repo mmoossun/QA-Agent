@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import ProviderSwitcher from "@/components/ProviderSwitcher";
+import NavBar from "@/components/NavBar";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -15,15 +15,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="ko">
       <body className={inter.className}>
         <div className="min-h-screen flex flex-col">
-          <nav className="bg-white border-b border-gray-100 px-6 py-3 flex items-center gap-6">
-            <div className="font-bold text-blue-600 text-lg">QA Agent</div>
-            <a href="/human-agent" className="text-sm font-medium text-blue-600 hover:text-blue-700 transition-colors bg-blue-50 px-3 py-1 rounded-full">Auto Agent</a>
-<a href="/chat" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Chat QA</a>
-            <a href="/reports" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Reports</a>
-            <a href="/dashboard" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">Dashboard</a>
-            <a href="/board" className="text-sm text-gray-600 hover:text-blue-600 transition-colors">QA Board</a>
-            <ProviderSwitcher />
-          </nav>
+          <NavBar />
           <main className="flex-1">{children}</main>
         </div>
       </body>

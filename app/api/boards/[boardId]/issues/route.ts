@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/db/client";
+import { sseEmit } from "@/lib/sse";
+import { notifySlack } from "@/lib/integrations/slack";
+import { createJiraTicket } from "@/lib/integrations/jira";
 
 const CreateSchema = z.object({
   title: z.string().min(1).max(300),
@@ -56,6 +59,19 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
       },
       include: { _count: { select: { comments: true } } },
     });
+
+    // SSE 브로드캐스트
+    sseEmit(params.boardId, "issue_created", issue);
+
+    // 비동기 외부 연동 (응답 지연 없이)
+    const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
+    notifySlack(params.boardId, `새 이슈 *${issue.issueKey}* 생성됨`, [
+      { title: "제목", value: issue.title },
+      { title: "우선순위", value: priLabel[issue.priority] ?? issue.priority },
+      { title: "담당자", value: issue.assignee ?? "미배정" },
+    ]);
+    createJiraTicket(params.boardId, { title: issue.title, description: issue.description ?? undefined, priority: issue.priority, type: issue.type });
+
     return NextResponse.json({ issue }, { status: 201 });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });

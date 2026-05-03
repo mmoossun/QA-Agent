@@ -19,9 +19,12 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.28.0",
     "@prisma/client": "^5.15.0",
+    "@types/bcryptjs": "^2.4.6",
+    "bcryptjs": "^3.0.3",
     "date-fns": "^3.6.0",
     "dotenv": "^17.4.2",
     "googleapis": "^171.4.0",
+    "jose": "^6.2.3",
     "next": "14.2.4",
     "openai": "^6.34.0",
     "pino": "^9.3.1",

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db/client";
+import { sseEmit } from "@/lib/sse";
+import { notifySlack } from "@/lib/integrations/slack";
 
 type Params = { params: { boardId: string; issueId: string } };
 
@@ -47,6 +49,19 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       data: updateData,
       include: { _count: { select: { comments: true } } },
     });
+
+    // SSE 실시간 브로드캐스트
+    sseEmit(params.boardId, "issue_updated", issue);
+
+    // Slack 알림 (상태 변경 시)
+    if (updateData.status && existing.status !== updateData.status) {
+      const stLabel: Record<string, string> = { todo: "할 일", in_progress: "진행 중", in_review: "검토 중", done: "완료", wont_fix: "해결 안 함" };
+      notifySlack(params.boardId,
+        `*${issue.issueKey}* 상태 변경: ${stLabel[existing.status]} → ${stLabel[String(updateData.status)]}`,
+        [{ title: "이슈", value: issue.title }, { title: "담당자", value: issue.assignee ?? "미배정" }]
+      );
+    }
+
     return NextResponse.json({ issue });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
@@ -55,5 +70,6 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
   await prisma.issue.delete({ where: { id: params.issueId } });
+  sseEmit(params.boardId, "issue_deleted", { id: params.issueId });
   return NextResponse.json({ ok: true });
 }

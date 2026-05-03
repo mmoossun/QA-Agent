@@ -136,8 +136,20 @@ export default function BoardPage() {
     if (!active) return;
     loadIssues(active.id);
     loadSprints(active.id);
-    const t = setInterval(() => loadIssues(active.id), 20_000);
-    return () => clearInterval(t);
+
+    // SSE 실시간 구독 (폴링 대체)
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(`/api/boards/${active.id}/events`);
+      es.addEventListener("issue_created", () => loadIssues(active.id));
+      es.addEventListener("issue_updated", () => loadIssues(active.id));
+      es.addEventListener("issue_deleted", () => loadIssues(active.id));
+      es.onerror = () => es?.close();
+    } catch { /* SSE not supported */ }
+
+    // SSE 실패 대비 폴링 fallback (60초)
+    const t = setInterval(() => loadIssues(active.id), 60_000);
+    return () => { clearInterval(t); es?.close(); };
   }, [active, loadIssues, loadSprints]);
 
   useEffect(() => {
