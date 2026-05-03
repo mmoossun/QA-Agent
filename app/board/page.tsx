@@ -30,6 +30,8 @@ interface ShareLink { id: string; publicToken: string; label?: string; viewCount
 interface Board {
   id: string; name: string; description?: string; targetUrl?: string;
   boardKey: string; issueCounter: number; wipLimits?: string;
+  figmaFileKey?: string; figmaFileUrl?: string;
+  githubOwner?: string; githubRepo?: string; hasGithubToken?: boolean;
   createdAt: string; _count: { issues: number }; shareLinks: ShareLink[];
 }
 interface Finding { title: string; description: string; severity: string; rootCause: string; reproductionSteps: string; recommendation: string; screenshotPath?: string; }
@@ -83,7 +85,7 @@ const jpatch = (url: string, b: unknown) => j(url, { method: "PATCH", headers: {
 const jdel   = (url: string)             => fetch(url, { method: "DELETE" });
 
 // ─── Main ─────────────────────────────────────────────────────
-type Modal = "create-board" | "create-issue" | "import" | "share" | "sprint" | null;
+type Modal = "create-board" | "create-issue" | "import" | "share" | "sprint" | "board-settings" | null;
 
 export default function BoardPage() {
   const [boards,  setBoards]  = useState<Board[]>([]);
@@ -300,6 +302,11 @@ export default function BoardPage() {
             {/* Actions */}
             <div className="flex gap-1.5 shrink-0">
               <button onClick={() => setModal("sprint")} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">🏃 스프린트</button>
+              <button onClick={() => setModal("board-settings")}
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${active.figmaFileKey || active.hasGithubToken ? "border-purple-300 bg-purple-50 text-purple-700" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}
+                title="Figma / GitHub 연동 설정">
+                ⚙ 연동 설정{(active.figmaFileKey || active.hasGithubToken) ? " ✓" : ""}
+              </button>
               <button onClick={() => setModal("import")} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">AI 가져오기</button>
               <button onClick={() => setModal("share")}  className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">🔗 공유</button>
               <button onClick={() => setModal("create-issue")} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-[#0052CC] text-white hover:bg-blue-700">+ 이슈</button>
@@ -428,6 +435,7 @@ export default function BoardPage() {
       {modal === "import" && active && <ImportModal boardId={active.id} onClose={() => setModal(null)} onImported={async () => { await loadIssues(active.id); setModal(null); }} />}
       {modal === "share" && active && <ShareModal board={active} onCopy={handleCopyLink} onCreated={loadBoards} onClose={() => setModal(null)} />}
       {modal === "sprint" && active && <SprintModal boardId={active.id} sprints={sprints} onClose={() => setModal(null)} onChanged={async () => { await loadSprints(active.id); setModal(null); }} />}
+      {modal === "board-settings" && active && <BoardSettingsModal board={active} onClose={() => setModal(null)} onSaved={async () => { const fresh = await loadBoards(); setActive(fresh.find(b => b.id === active.id) ?? active); setModal(null); }} />}
     </div>
   );
 }
@@ -1232,6 +1240,139 @@ function ShareModal({ board, onCopy, onCreated, onClose }: { board: Board; onCop
           <div className="border-t pt-4"><p className="text-xs font-bold text-gray-500 uppercase mb-2">새 링크 생성</p>
             <div className="flex gap-2"><input value={label} onChange={e => setLabel(e.target.value)} placeholder="링크 이름 (선택)" className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400" /><button onClick={create} disabled={creating} className="text-sm font-bold bg-[#0052CC] text-white px-4 py-2 rounded-xl hover:bg-blue-700 disabled:opacity-50">{creating ? "..." : "생성"}</button></div>
             <p className="text-xs text-gray-400 mt-2">로그인 없이 누구나 이 보드를 볼 수 있습니다</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Board Settings Modal (Figma + GitHub 연동) ───────────────
+function BoardSettingsModal({ board, onClose, onSaved }: { board: Board; onClose: () => void; onSaved: () => void }) {
+  const [tab, setTab] = useState<"figma" | "github">("figma");
+  const [figmaUrl, setFigmaUrl]   = useState(board.figmaFileUrl ?? "");
+  const [ghOwner,  setGhOwner]    = useState(board.githubOwner  ?? "");
+  const [ghRepo,   setGhRepo]     = useState(board.githubRepo   ?? "");
+  const [ghToken,  setGhToken]    = useState("");
+  const [saving,   setSaving]     = useState(false);
+  const [testing,  setTesting]    = useState(false);
+  const [testMsg,  setTestMsg]    = useState("");
+  const [saved,    setSavedMsg]   = useState("");
+
+  const handleSave = async () => {
+    setSaving(true); setSavedMsg("");
+    const body: Record<string, string> = {};
+    if (tab === "figma") body.figmaFileUrl = figmaUrl;
+    if (tab === "github") {
+      body.githubOwner = ghOwner;
+      body.githubRepo  = ghRepo;
+      if (ghToken) body.githubToken = ghToken;
+    }
+    await jpatch(`/api/boards/${board.id}/settings`, body);
+    setSaving(false); setSavedMsg("✅ 저장됐습니다");
+    setTimeout(() => { setSavedMsg(""); onSaved(); }, 1200);
+  };
+
+  const handleTestGithub = async () => {
+    setTesting(true); setTestMsg("");
+    const d = await jpost(`/api/boards/${board.id}/settings`, { action: "test-github" }) as { ok: boolean; repoName?: string; error?: string };
+    setTesting(false);
+    setTestMsg(d.ok ? `✅ 연결 성공: ${d.repoName}` : `❌ 연결 실패: ${d.error ?? "토큰/레포를 확인하세요"}`);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-black text-gray-800">보드 연동 설정</h2>
+            <p className="text-xs text-gray-400 mt-0.5">{board.name}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
+
+        {/* 탭 */}
+        <div className="flex border-b">
+          {(["figma", "github"] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`flex-1 py-3 text-sm font-bold transition-colors ${tab === t ? "border-b-2 border-[#0052CC] text-[#0052CC]" : "text-gray-400 hover:text-gray-600"}`}>
+              {t === "figma" ? "🎨 Figma" : "🐙 GitHub"}
+              {t === "figma" && board.figmaFileKey && " ✓"}
+              {t === "github" && board.hasGithubToken && " ✓"}
+            </button>
+          ))}
+        </div>
+
+        <div className="px-6 py-5 space-y-4">
+          {tab === "figma" && (
+            <>
+              <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs text-purple-700">
+                <strong>Figma 파일 URL</strong>을 연결하면 이슈 생성 시 Figma 파일에 댓글이 자동으로 등록됩니다.
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">Figma 파일 URL</label>
+                <input value={figmaUrl} onChange={e => setFigmaUrl(e.target.value)}
+                  placeholder="https://www.figma.com/file/AbcXXX/프로젝트명"
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400" />
+                <p className="text-xs text-gray-400 mt-1">파일 URL만 입력 (node-id 불필요). 이슈에 Figma URL 있으면 프레임에, 없으면 파일 레벨에 댓글 등록.</p>
+              </div>
+              {board.figmaFileKey && (
+                <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-xs text-green-700">
+                  ✅ 연결된 Figma 파일 키: <code className="font-mono font-bold">{board.figmaFileKey}</code>
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "github" && (
+            <>
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-xs text-gray-600">
+                <strong>GitHub 레포</strong>를 연결하면 이슈 생성 시 GitHub Issue가 자동 등록되고, done 처리 시 자동으로 닫힙니다.
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">소유자 (Owner)</label>
+                  <input value={ghOwner} onChange={e => setGhOwner(e.target.value)} placeholder="mmoossun"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">레포 이름</label>
+                  <input value={ghRepo} onChange={e => setGhRepo(e.target.value)} placeholder="my-app"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">
+                  Personal Access Token
+                  {board.hasGithubToken && <span className="ml-2 text-green-600 font-normal normal-case">✅ 저장됨 (변경 시만 입력)</span>}
+                </label>
+                <input type="password" value={ghToken} onChange={e => setGhToken(e.target.value)}
+                  placeholder={board.hasGithubToken ? "변경하려면 새 토큰 입력" : "ghp_xxxxxxxxxxxx (repo 권한 필요)"}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                <p className="text-xs text-gray-400 mt-1">
+                  GitHub → Settings → Developer settings → Personal access tokens → <strong>repo</strong> 권한 선택
+                </p>
+              </div>
+              {testMsg && (
+                <div className={`text-xs px-3 py-2 rounded-xl ${testMsg.startsWith("✅") ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                  {testMsg}
+                </div>
+              )}
+              <button onClick={handleTestGithub} disabled={testing}
+                className="w-full border border-gray-300 text-gray-700 py-2 rounded-xl text-sm font-semibold hover:bg-gray-50 disabled:opacity-50">
+                {testing ? "연결 테스트 중..." : "🔌 GitHub 연결 테스트"}
+              </button>
+            </>
+          )}
+
+          {saved && <p className="text-sm text-green-600 font-semibold text-center">{saved}</p>}
+
+          <div className="flex gap-3 pt-1">
+            <button onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-gray-50">닫기</button>
+            <button onClick={handleSave} disabled={saving}
+              className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-black hover:bg-blue-700 disabled:opacity-50">
+              {saving ? "저장 중..." : "설정 저장"}
+            </button>
           </div>
         </div>
       </div>

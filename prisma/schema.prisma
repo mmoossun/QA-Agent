@@ -191,6 +191,13 @@ model QABoard {
   boardKey     String   @default("QA")
   issueCounter Int      @default(0)
   wipLimits    String?  // JSON: { in_progress: 3, in_review: 2 }
+  // Figma 보드 단위 연동
+  figmaFileKey String?  // Figma 파일 키 (URL에서 파싱)
+  figmaFileUrl String?  // 원본 Figma 파일 URL
+  // GitHub 보드 단위 연동
+  githubOwner  String?  // 레포 소유자 (예: mmoossun)
+  githubRepo   String?  // 레포 이름 (예: my-app)
+  githubToken  String?  // Personal Access Token
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

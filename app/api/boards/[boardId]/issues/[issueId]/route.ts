@@ -3,6 +3,7 @@ import prisma from "@/lib/db/client";
 import { sseEmit } from "@/lib/sse";
 import { notifySlack } from "@/lib/integrations/slack";
 import { deleteFigmaComment } from "@/lib/integrations/figma";
+import { closeGithubIssue } from "@/lib/integrations/github";
 
 type Params = { params: { boardId: string; issueId: string } };
 
@@ -54,11 +55,20 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     // SSE 실시간 브로드캐스트
     sseEmit(params.boardId, "issue_updated", issue);
 
-    // ── 2단계: 이슈 done → Figma 댓글 삭제 ──────────────────────
+    // done 처리 시 Figma 댓글 삭제 + GitHub Issue 닫기
     if (updateData.status === "done" && existing.status !== "done" && existing.externalIds) {
       const ext = JSON.parse(existing.externalIds) as Record<string, string>;
       if (ext.figma_comment_id && ext.figma_file_key) {
         deleteFigmaComment(ext.figma_file_key, ext.figma_comment_id);
+      }
+      if (ext.github_issue_number && ext.github_repo) {
+        const [owner, repo] = ext.github_repo.split("/");
+        const board = await prisma.qABoard.findUnique({
+          where: { id: params.boardId }, select: { githubToken: true },
+        });
+        if (board?.githubToken) {
+          closeGithubIssue({ owner, repo, token: board.githubToken }, Number(ext.github_issue_number));
+        }
       }
     }
 

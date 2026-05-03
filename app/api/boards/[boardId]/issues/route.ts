@@ -5,6 +5,7 @@ import { sseEmit } from "@/lib/sse";
 import { notifySlack } from "@/lib/integrations/slack";
 import { createJiraTicket } from "@/lib/integrations/jira";
 import { parseFigmaUrl, createFigmaComment, getFigmaFrameImage } from "@/lib/integrations/figma";
+import { createGithubIssue } from "@/lib/integrations/github";
 
 const CreateSchema = z.object({
   title: z.string().min(1).max(300),
@@ -104,6 +105,53 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
       { title: "담당자", value: issue.assignee ?? "미배정" },
     ]);
     createJiraTicket(params.boardId, { title: issue.title, description: issue.description ?? undefined, priority: issue.priority, type: issue.type });
+
+    // GitHub 이슈 자동 생성
+    ;(async () => {
+      const board = await prisma.qABoard.findUnique({
+        where: { id: params.boardId },
+        select: { githubOwner: true, githubRepo: true, githubToken: true, figmaFileKey: true },
+      });
+      if (board?.githubOwner && board.githubRepo && board.githubToken) {
+        const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
+        const body = [
+          `**이슈 키:** ${issue.issueKey}`,
+          `**우선순위:** ${priLabel[issue.priority] ?? issue.priority}`,
+          issue.description ? `\n**설명:**\n${issue.description}` : "",
+          issue.stepToReproduce ? `\n**재현 단계:**\n${issue.stepToReproduce}` : "",
+          issue.expectedResult  ? `\n**기대 결과:** ${issue.expectedResult}` : "",
+          issue.actualResult    ? `\n**실제 결과:** ${issue.actualResult}` : "",
+          issue.targetUrl       ? `\n**URL:** ${issue.targetUrl}` : "",
+          `\n---\n*QA Board에서 자동 생성된 이슈입니다.*`,
+        ].filter(Boolean).join("\n");
+
+        const ghNumber = await createGithubIssue(
+          { owner: board.githubOwner, repo: board.githubRepo, token: board.githubToken },
+          { title: `[${issue.issueKey}] ${issue.title}`, body, labels: ["qa-board", issue.priority] },
+        );
+        if (ghNumber) {
+          const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
+          await prisma.issue.update({
+            where: { id: issue.id },
+            data: { externalIds: JSON.stringify({ ...ext, github_issue_number: ghNumber, github_repo: `${board.githubOwner}/${board.githubRepo}` }) },
+          });
+        }
+      }
+
+      // Figma: 보드에 figmaFileKey 설정된 경우 (이슈 targetUrl 없어도 보드 Figma 파일에 댓글)
+      if (board?.figmaFileKey && !data.targetUrl) {
+        const priLabel2: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
+        const msg = `[QA Board] ${issue.issueKey} · ${priLabel2[issue.priority] ?? issue.priority}\n${issue.title}`;
+        const commentId = await createFigmaComment(board.figmaFileKey, undefined, msg);
+        if (commentId) {
+          const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
+          await prisma.issue.update({
+            where: { id: issue.id },
+            data: { externalIds: JSON.stringify({ ...ext, figma_comment_id: commentId, figma_file_key: board.figmaFileKey }) },
+          });
+        }
+      }
+    })();
 
     return NextResponse.json({ issue }, { status: 201 });
   } catch (e) {

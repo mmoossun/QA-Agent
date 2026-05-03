@@ -21,7 +21,13 @@ export async function GET() {
       },
     },
   });
-  return NextResponse.json({ boards });
+  // 민감 정보(토큰) 제외하고 연동 상태만 노출
+  const safe = boards.map(b => ({
+    ...b,
+    githubToken: undefined,
+    hasGithubToken: !!b.githubToken,
+  }));
+  return NextResponse.json({ boards: safe });
 }
 
 export async function POST(req: NextRequest) {
