@@ -4,6 +4,7 @@ import prisma from "@/lib/db/client";
 import { sseEmit } from "@/lib/sse";
 import { notifySlack } from "@/lib/integrations/slack";
 import { createJiraTicket } from "@/lib/integrations/jira";
+import { parseFigmaUrl, createFigmaComment, getFigmaFrameImage } from "@/lib/integrations/figma";
 
 const CreateSchema = z.object({
   title: z.string().min(1).max(300),
@@ -62,6 +63,38 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
 
     // SSE 브로드캐스트
     sseEmit(params.boardId, "issue_created", issue);
+
+    // ── Figma 연동 (비동기, 응답 지연 없음) ──────────────────────
+    if (data.targetUrl) {
+      const figma = parseFigmaUrl(data.targetUrl);
+      if (figma) {
+        (async () => {
+          // 3단계: 스크린샷 자동 첨부 (screenshotUrl 미입력 시)
+          if (!data.screenshotUrl && figma.nodeId) {
+            const imgUrl = await getFigmaFrameImage(figma.fileKey, figma.nodeId);
+            if (imgUrl) {
+              await prisma.issue.update({
+                where: { id: issue.id },
+                data: { screenshotUrl: imgUrl },
+              });
+            }
+          }
+          // 1단계: Figma 댓글 자동 등록
+          if (figma.nodeId) {
+            const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };
+            const msg = `[QA Board] ${issue.issueKey} · ${priLabel[issue.priority] ?? issue.priority}\n${issue.title}${issue.description ? `\n\n${issue.description}` : ""}`;
+            const commentId = await createFigmaComment(figma.fileKey, figma.nodeId, msg);
+            if (commentId) {
+              const ext = issue.externalIds ? JSON.parse(issue.externalIds) : {};
+              await prisma.issue.update({
+                where: { id: issue.id },
+                data: { externalIds: JSON.stringify({ ...ext, figma_comment_id: commentId, figma_file_key: figma.fileKey }) },
+              });
+            }
+          }
+        })();
+      }
+    }
 
     // 비동기 외부 연동 (응답 지연 없이)
     const priLabel: Record<string, string> = { critical: "⛔ Critical", high: "🔴 High", medium: "🟡 Medium", low: "🔵 Low" };

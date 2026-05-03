@@ -958,7 +958,21 @@ function CreateBoardModal({ onClose, onCreated }: { onClose: () => void; onCreat
 function CreateIssueModal({ boardId, sprints, epics, onClose, onCreated }: { boardId: string; sprints: Sprint[]; epics: string[]; onClose: () => void; onCreated: () => void }) {
   const [f, setF] = useState({ title: "", description: "", type: "bug" as IssueType, priority: "medium" as Priority, assignee: "", reporter: "", epicName: "", storyPoints: "", environment: "", step: "", expected: "", actual: "", url: "", dueDate: "", sprintId: "" });
   const [saving, setSaving] = useState(false); const [error, setError] = useState("");
+  const [figmaPreview, setFigmaPreview] = useState<string | null>(null);
+  const [figmaLoading, setFigmaLoading] = useState(false);
   const u = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  // Figma URL 입력 시 프레임 미리보기 자동 로드
+  const handleUrlChange = async (url: string) => {
+    u("url", url);
+    setFigmaPreview(null);
+    if (!url.includes("figma.com") || !url.includes("node-id")) return;
+    setFigmaLoading(true);
+    try {
+      const d = await j(`/api/figma/frame-preview?url=${encodeURIComponent(url)}`);
+      if (d.imageUrl) setFigmaPreview(d.imageUrl);
+    } catch { /* ignore */ } finally { setFigmaLoading(false); }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); if (!f.title.trim()) { setError("제목을 입력하세요."); return; }
@@ -1054,9 +1068,27 @@ function CreateIssueModal({ boardId, sprints, epics, onClose, onCreated }: { boa
                 </select></div>
             )}
           </div>
-          <div><label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">URL</label>
-            <input value={f.url} onChange={e => u("url", e.target.value)} placeholder="https://example.com/page"
-              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">
+              URL
+              {f.url.includes("figma.com") && (
+                <span className="ml-2 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-bold normal-case">
+                  🎨 Figma 연동됨 — 댓글 자동 등록
+                </span>
+              )}
+            </label>
+            <input value={f.url} onChange={e => handleUrlChange(e.target.value)}
+              placeholder="https://example.com  또는  figma.com/file/... (Figma URL 입력 시 자동 연동)"
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+            {/* Figma 프레임 미리보기 */}
+            {figmaLoading && <p className="text-xs text-purple-500 mt-1.5">🎨 Figma 프레임 로딩 중...</p>}
+            {figmaPreview && (
+              <div className="mt-2 rounded-xl overflow-hidden border-2 border-purple-200">
+                <img src={figmaPreview} alt="Figma 프레임 미리보기" className="w-full max-h-48 object-cover object-top" />
+                <p className="text-[10px] text-center text-purple-600 bg-purple-50 py-1 font-semibold">Figma 프레임 미리보기 — 이슈 생성 시 스크린샷으로 첨부됩니다</p>
+              </div>
+            )}
+          </div>
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose} className="flex-1 border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-gray-50">취소</button>
             <button type="submit" disabled={saving} className="flex-1 bg-[#0052CC] text-white py-2.5 rounded-xl text-sm font-black hover:bg-blue-700 disabled:opacity-50">{saving ? "생성 중..." : "이슈 만들기"}</button>
