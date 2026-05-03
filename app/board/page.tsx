@@ -534,11 +534,24 @@ function IssueCard({ issue, selected, dragging, onClick, onSelect, onStatusChang
   const nextMap: Partial<Record<Status, Status>> = { todo: "in_progress", in_progress: "in_review", in_review: "done" };
   const next = nextMap[issue.status];
 
+  // 드래그 vs 클릭 구분: mousedown부터 mouseup까지 이동 거리가 5px 미만이면 클릭으로 처리
+  const dragDist = useRef(0);
+  const dragStart = useRef({ x: 0, y: 0 });
+  const handleMouseDown = (e: React.MouseEvent) => { dragStart.current = { x: e.clientX, y: e.clientY }; dragDist.current = 0; };
+  const handleMouseMove = (e: React.MouseEvent) => { dragDist.current = Math.abs(e.clientX - dragStart.current.x) + Math.abs(e.clientY - dragStart.current.y); };
+  const handleCardClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return; // 버튼 클릭은 무시
+    if (dragDist.current < 5) onClick();
+  };
+
   return (
     <div
       draggable
       onDragStart={e => { e.dataTransfer.effectAllowed = "move"; onDragStart(); }}
       onDragEnd={onDragEnd}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onClick={handleCardClick}
       className={`bg-white border rounded-xl p-3 transition-all cursor-pointer group
         ${selected ? "border-blue-400 ring-2 ring-blue-200 shadow-md" : "border-gray-200 hover:border-blue-300 hover:shadow-md"}
         ${dragging ? "opacity-40 rotate-2 scale-95" : ""}
@@ -556,7 +569,7 @@ function IssueCard({ issue, selected, dragging, onClick, onSelect, onStatusChang
         </span>
       </div>
       {/* Title */}
-      <p className="text-xs font-semibold text-gray-800 leading-snug line-clamp-2 mb-2" onClick={onClick}>{issue.title}</p>
+      <p className="text-xs font-semibold text-gray-800 leading-snug line-clamp-2 mb-2">{issue.title}</p>
       {/* Epic + Story points */}
       {(issue.epicName || issue.storyPoints) && (
         <div className="flex items-center gap-1.5 mb-2">
@@ -566,12 +579,12 @@ function IssueCard({ issue, selected, dragging, onClick, onSelect, onStatusChang
       )}
       {/* Screenshot */}
       {issue.screenshotUrl && (
-        <div className="mb-2 rounded-lg overflow-hidden border border-gray-100" onClick={onClick}>
+        <div className="mb-2 rounded-lg overflow-hidden border border-gray-100">
           <img src={issue.screenshotUrl} alt="" className="w-full h-16 object-cover object-top" />
         </div>
       )}
       {/* Footer */}
-      <div className="flex items-center gap-1.5" onClick={onClick}>
+      <div className="flex items-center gap-1.5">
         {issue.assignee
           ? <div className="flex items-center gap-1"><div className="w-4 h-4 bg-[#0052CC] rounded-full flex items-center justify-center text-white text-[8px] font-black">{av(issue.assignee)}</div><span className="text-[10px] text-gray-500 max-w-[60px] truncate">{issue.assignee}</span></div>
           : <span className="text-[10px] text-gray-400">미배정</span>
