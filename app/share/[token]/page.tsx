@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 
 type Severity = "critical" | "major" | "minor" | "trivial";
-type Status   = "open" | "in_progress" | "resolved" | "wont_fix";
+type Status   = "todo" | "in_progress" | "in_review" | "done" | "wont_fix";
 
 interface Issue {
   id: string;
@@ -41,10 +41,11 @@ const SEV_CONFIG: Record<Severity, { label: string; color: string; dot: string }
 };
 
 const STATUS_COLS: { id: Status; label: string; color: string }[] = [
-  { id: "open",        label: "Open",        color: "border-red-400"    },
-  { id: "in_progress", label: "In Progress", color: "border-yellow-400" },
-  { id: "resolved",    label: "Resolved",    color: "border-green-400"  },
-  { id: "wont_fix",    label: "Won't Fix",   color: "border-gray-400"   },
+  { id: "todo",        label: "할 일",       color: "border-slate-400"  },
+  { id: "in_progress", label: "진행 중",     color: "border-blue-400"   },
+  { id: "in_review",   label: "검토 중",     color: "border-violet-400" },
+  { id: "done",        label: "완료",         color: "border-green-400"  },
+  { id: "wont_fix",    label: "해결 안 함",  color: "border-gray-400"   },
 ];
 
 function relativeTime(iso: string) {

@@ -36,7 +36,7 @@ export async function GET(_req: NextRequest, { params }: { params: { token: stri
   const { board } = link;
   const issues = board.issues;
   const total = issues.length;
-  const resolved = issues.filter(i => i.status === "resolved").length;
+  const resolved = issues.filter(i => i.status === "done").length;
   const criticalOpen = issues.filter(i => i.priority === "critical" && i.status !== "done").length;
 
   return NextResponse.json({

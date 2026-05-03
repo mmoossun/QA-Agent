@@ -1,7 +1,3 @@
-/**
- * POST /api/boards/[boardId]/issues/import
- * SavedReport findings → Issue 일괄 생성
- */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/db/client";
@@ -15,7 +11,7 @@ const Schema = z.object({
   findings: z.array(z.object({
     title: z.string(),
     description: z.string().optional().default(""),
-    severity: z.string().optional().default("minor"),
+    severity: z.string().optional().default("medium"),
     rootCause: z.string().optional().default(""),
     reproductionSteps: z.string().optional().default(""),
     recommendation: z.string().optional().default(""),
@@ -28,16 +24,28 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
   try {
     const body = await req.json();
     const { findings } = Schema.parse(body);
+
+    // issueKey를 위해 카운터를 findings 수만큼 한번에 증가
+    const board = await prisma.qABoard.update({
+      where: { id: params.boardId },
+      data: { issueCounter: { increment: findings.length } },
+      select: { boardKey: true, issueCounter: true },
+    });
+
+    // 마지막 카운터 값 기준으로 역산하여 각 finding에 key 부여
+    const startCounter = board.issueCounter - findings.length + 1;
+
     const created = await prisma.$transaction(
-      findings.map(f =>
+      findings.map((f, i) =>
         prisma.issue.create({
           data: {
             boardId: params.boardId,
+            issueKey: `${board.boardKey}-${startCounter + i}`,
             title: f.title,
-            description: [f.description, f.rootCause ? `원인: ${f.rootCause}` : ""].filter(Boolean).join("\n\n"),
+            description: [f.description, f.rootCause ? `원인: ${f.rootCause}` : ""].filter(Boolean).join("\n\n") || undefined,
             priority: SEV_MAP[f.severity] ?? "medium",
             type: "bug",
-            status: "open",
+            status: "todo",
             source: "agent",
             stepToReproduce: f.reproductionSteps || undefined,
             expectedResult: f.recommendation ? `권장 조치: ${f.recommendation}` : undefined,
@@ -47,7 +55,7 @@ export async function POST(req: NextRequest, { params }: { params: { boardId: st
         })
       )
     );
-    return NextResponse.json({ created: created.length }, { status: 201 });
+    return NextResponse.json({ created: created.length, keys: created.map(i => i.issueKey) }, { status: 201 });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
   }
