@@ -680,6 +680,24 @@ function BacklogView({ issues, sprints, activeSprint, selected, onDetail, onStat
   );
 }
 
+// ─── Figma layer picker shared types & utils ─────────────────
+interface FigmaFrameNode { id: string; name: string; type: string; children?: FigmaFrameNode[]; }
+interface FigmaPage { id: string; name: string; frames: FigmaFrameNode[]; }
+
+const FIGMA_ICON:  Record<string, string> = { FRAME: "▣", SECTION: "⬡", COMPONENT: "◈", COMPONENT_SET: "◈", GROUP: "◻" };
+const FIGMA_COLOR: Record<string, string> = { FRAME: "text-purple-400", SECTION: "text-blue-400", COMPONENT: "text-green-400", COMPONENT_SET: "text-green-500", GROUP: "text-gray-400" };
+
+function figmaFlatSearch(nodes: FigmaFrameNode[], query: string, page: FigmaPage): Array<{ node: FigmaFrameNode; page: FigmaPage; path: string }> {
+  const results: Array<{ node: FigmaFrameNode; page: FigmaPage; path: string }> = [];
+  function walk(n: FigmaFrameNode, parentPath: string) {
+    const path = parentPath ? `${parentPath} / ${n.name}` : n.name;
+    if (n.name.toLowerCase().includes(query.toLowerCase())) results.push({ node: n, page, path });
+    n.children?.forEach(c => walk(c, path));
+  }
+  nodes.forEach(n => walk(n, ""));
+  return results;
+}
+
 // ─── Detail Panel ─────────────────────────────────────────────
 function DetailPanel({ issue, boardId, board, allIssues, onClose, onStatusChange, onDelete, onUpdate, onExternalUpdate }: {
   issue: Issue; boardId: string; board: Board; allIssues: Issue[];
@@ -690,6 +708,16 @@ function DetailPanel({ issue, boardId, board, allIssues, onClose, onStatusChange
   const [tab, setTab] = useState<"detail" | "activity" | "links" | "integrations">("detail");
   const [pushing, setPushing] = useState<"figma" | "github" | null>(null);
   const [pushMsg, setPushMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+
+  // Figma 레이어 선택 (연동 탭)
+  const [figmaPickerOpen, setFigmaPickerOpen]     = useState(false);
+  const [figmaPickerPages, setFigmaPickerPages]   = useState<FigmaPage[]>([]);
+  const [figmaPickerKey, setFigmaPickerKey]       = useState<string | null>(null);
+  const [figmaPickerLoading, setFigmaPickerLoading] = useState(false);
+  const [figmaPickerError, setFigmaPickerError]   = useState("");
+  const [selectedLayer, setSelectedLayer]         = useState<{ nodeId: string; name: string; pageName: string } | null>(null);
+  const [layerExpanded, setLayerExpanded]         = useState<Set<string>>(new Set());
+  const [layerSearch, setLayerSearch]             = useState("");
   const [activity, setActivity] = useState<Activity[]>([]);
   const [links, setLinks] = useState<IssueLink[]>([]);
   const [comment, setComment] = useState("");
@@ -727,18 +755,63 @@ function DetailPanel({ issue, boardId, board, allIssues, onClose, onStatusChange
 
   const handlePush = async (target: "figma" | "github") => {
     setPushing(target); setPushMsg(null);
-    const d = await jpost(`/api/boards/${boardId}/issues/${issue.id}/push`, { target }) as { ok?: boolean; error?: string; commentId?: string; issueNumber?: number; repo?: string };
+    const body: Record<string, unknown> = { target };
+    if (target === "figma" && selectedLayer) body.figmaNodeId = selectedLayer.nodeId;
+    const d = await jpost(`/api/boards/${boardId}/issues/${issue.id}/push`, body) as { ok?: boolean; error?: string; commentId?: string; issueNumber?: number; repo?: string };
     setPushing(null);
     if (d.error) {
       setPushMsg({ type: "err", text: d.error });
     } else {
       const msg = target === "figma"
-        ? `✅ Figma 코멘트 등록됨 (ID: ${d.commentId})`
+        ? `✅ Figma 코멘트 등록됨${selectedLayer ? ` (${selectedLayer.pageName} / ${selectedLayer.name})` : ""}`
         : `✅ GitHub 이슈 #${d.issueNumber} 등록됨 (${d.repo})`;
       setPushMsg({ type: "ok", text: msg });
-      onExternalUpdate(); // 이슈 목록 새로고침 (externalIds 업데이트 반영)
+      onExternalUpdate();
     }
   };
+
+  const openLayerPicker = async () => {
+    setFigmaPickerOpen(true); setFigmaPickerError("");
+    if (figmaPickerPages.length > 0) return;
+    setFigmaPickerLoading(true);
+    try {
+      const d = await j(`/api/boards/${boardId}/figma/frames`) as { pages?: FigmaPage[]; fileKey?: string; error?: string };
+      if (d.error) { setFigmaPickerError(d.error); return; }
+      setFigmaPickerPages(d.pages ?? []);
+      setFigmaPickerKey(d.fileKey ?? null);
+      if (d.pages?.[0]) setLayerExpanded(new Set([d.pages[0].id]));
+    } catch { setFigmaPickerError("Figma 프레임 목록을 불러오지 못했습니다."); }
+    finally { setFigmaPickerLoading(false); }
+  };
+
+  const selectLayer = (page: FigmaPage, node: FigmaFrameNode) => {
+    setSelectedLayer({ nodeId: node.id, name: node.name, pageName: page.name });
+    setFigmaPickerOpen(false); setLayerSearch("");
+  };
+
+  const toggleLayerNode = (id: string) =>
+    setLayerExpanded(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  function renderLayerNode(node: FigmaFrameNode, page: FigmaPage, depth: number): React.ReactNode {
+    const hasChildren = (node.children?.length ?? 0) > 0;
+    const isExpanded = layerExpanded.has(node.id);
+    const pl = 10 + depth * 12;
+    return (
+      <div key={node.id}>
+        <div className="flex items-center group border-b border-gray-50 hover:bg-purple-50 transition-colors cursor-pointer"
+          style={{ paddingLeft: pl }} onClick={() => selectLayer(page, node)}>
+          <span className={`w-4 shrink-0 text-[10px] text-center ${hasChildren ? "text-gray-400 hover:text-gray-700" : "opacity-0 pointer-events-none"}`}
+            onClick={hasChildren ? e => { e.stopPropagation(); toggleLayerNode(node.id); } : undefined}>
+            {isExpanded ? "▾" : "▸"}
+          </span>
+          <span className={`text-[11px] shrink-0 mr-1 ${FIGMA_COLOR[node.type] ?? "text-gray-400"}`}>{FIGMA_ICON[node.type] ?? "▣"}</span>
+          <span className="text-xs text-gray-700 truncate py-1.5 flex-1 group-hover:text-purple-800">{node.name}</span>
+          {hasChildren && <span className="text-[10px] text-gray-400 pr-2 shrink-0">{node.children!.length}</span>}
+        </div>
+        {hasChildren && isExpanded && <div>{node.children!.map(c => renderLayerNode(c, page, depth + 1))}</div>}
+      </div>
+    );
+  }
 
   const addIssueLink = async () => {
     const target = allIssues.find(i => i.issueKey === linkTarget || i.id === linkTarget);
@@ -971,6 +1044,83 @@ function DetailPanel({ issue, boardId, board, allIssues, onClose, onStatusChange
                     {!canFigma && (
                       <p className="text-xs text-gray-400">보드에 Figma 파일이 연동되지 않았습니다. <a href="#" onClick={e => { e.preventDefault(); onClose(); }} className="text-[#0052CC] hover:underline">⚙ 연동 설정</a>에서 추가하세요.</p>
                     )}
+
+                    {/* 레이어 선택 버튼 */}
+                    {canFigma && (
+                      <div>
+                        <button onClick={openLayerPicker}
+                          className="w-full flex items-center justify-between px-3 py-2 border border-purple-200 rounded-xl bg-white text-xs font-semibold text-purple-700 hover:bg-purple-50 transition-colors">
+                          <span>🎨 Figma 레이어 선택 {selectedLayer ? "(변경)" : "(선택 안 하면 파일 전체에 등록)"}</span>
+                          <span className="text-purple-400">▾</span>
+                        </button>
+                        {selectedLayer && (
+                          <div className="flex items-center gap-2 mt-1.5 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-xl">
+                            <span className="text-purple-500 text-xs">▣</span>
+                            <span className="text-xs text-purple-800 font-semibold truncate">{selectedLayer.pageName} / {selectedLayer.name}</span>
+                            <button onClick={() => setSelectedLayer(null)} className="ml-auto text-purple-400 hover:text-purple-600 text-xs shrink-0">✕</button>
+                          </div>
+                        )}
+
+                        {/* 인라인 피커 패널 */}
+                        {figmaPickerOpen && (
+                          <div className="mt-2 border border-purple-200 rounded-xl overflow-hidden bg-white shadow-md">
+                            <div className="flex items-center justify-between px-3 py-2 bg-purple-50 border-b border-purple-100">
+                              <span className="text-[11px] font-bold text-purple-800">레이어 선택</span>
+                              <button onClick={() => setFigmaPickerOpen(false)} className="text-purple-400 hover:text-purple-600 text-xs">✕</button>
+                            </div>
+                            {figmaPickerLoading && <p className="text-xs text-center text-purple-400 py-4">불러오는 중...</p>}
+                            {figmaPickerError && <p className="text-xs text-red-500 px-3 py-2">{figmaPickerError}</p>}
+                            {!figmaPickerLoading && !figmaPickerError && figmaPickerPages.length > 0 && (
+                              <>
+                                <div className="px-2 py-1.5 border-b border-gray-100">
+                                  <input value={layerSearch} onChange={e => setLayerSearch(e.target.value)}
+                                    placeholder="레이어 검색..."
+                                    className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-300" />
+                                </div>
+                                <div className="max-h-52 overflow-y-auto">
+                                  {layerSearch ? (
+                                    figmaPickerPages.flatMap(p => figmaFlatSearch(p.frames, layerSearch, p)).length === 0
+                                      ? <p className="text-xs text-gray-400 text-center py-3">일치 없음</p>
+                                      : figmaPickerPages.flatMap(p => figmaFlatSearch(p.frames, layerSearch, p)).map(({ node, page, path }) => (
+                                        <button key={node.id} onClick={() => selectLayer(page, node)}
+                                          className="w-full flex items-center gap-2 px-3 py-1.5 text-left border-b border-gray-50 hover:bg-purple-50 transition-colors">
+                                          <span className={`text-[11px] shrink-0 ${FIGMA_COLOR[node.type] ?? "text-gray-400"}`}>{FIGMA_ICON[node.type] ?? "▣"}</span>
+                                          <div className="min-w-0">
+                                            <p className="text-xs text-gray-700 font-semibold truncate">{node.name}</p>
+                                            <p className="text-[10px] text-gray-400 truncate">{page.name} / {path.split(" / ").slice(0, -1).join(" / ") || "—"}</p>
+                                          </div>
+                                        </button>
+                                      ))
+                                  ) : (
+                                    figmaPickerPages.map(page => (
+                                      <div key={page.id}>
+                                        <button onClick={() => toggleLayerNode(page.id)}
+                                          className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 border-b border-gray-200 sticky top-0">
+                                          <span className="text-gray-400 text-[10px]">{layerExpanded.has(page.id) ? "▾" : "▸"}</span>
+                                          <span>📄 {page.name}</span>
+                                          <span className="ml-auto text-gray-400 font-normal text-[10px]">{page.frames.length}</span>
+                                        </button>
+                                        {layerExpanded.has(page.id) && (
+                                          <div>
+                                            {page.frames.length === 0
+                                              ? <p className="text-[10px] text-gray-400 px-4 py-2">프레임 없음</p>
+                                              : page.frames.map(f => renderLayerNode(f, page, 0))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                                <div className="px-3 py-1 bg-gray-50 border-t border-gray-100">
+                                  <span className="text-[10px] text-gray-400">▸ 펼치기 · 행 클릭 시 선택</span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <button onClick={() => handlePush("figma")} disabled={!!pushing || !canFigma}
                       className="w-full bg-purple-600 text-white py-2.5 rounded-xl text-xs font-black hover:bg-purple-700 disabled:opacity-40 transition-colors">
                       {pushing === "figma" ? "Figma에 등록 중..." : "🎨 Figma 코멘트로 등록"}
@@ -1148,12 +1298,79 @@ function CreateBoardModal({ onClose, onCreated }: { onClose: () => void; onCreat
 }
 
 // ─── Create Issue Modal ───────────────────────────────────────
+
 function CreateIssueModal({ boardId, sprints, epics, onClose, onCreated }: { boardId: string; sprints: Sprint[]; epics: string[]; onClose: () => void; onCreated: () => void }) {
   const [f, setF] = useState({ title: "", description: "", type: "bug" as IssueType, priority: "medium" as Priority, assignee: "", reporter: "", epicName: "", storyPoints: "", environment: "", step: "", expected: "", actual: "", url: "", dueDate: "", sprintId: "" });
   const [saving, setSaving] = useState(false); const [error, setError] = useState("");
   const [figmaPreview, setFigmaPreview] = useState<string | null>(null);
   const [figmaLoading, setFigmaLoading] = useState(false);
+
+  // Figma 레이어 선택
+  const [showFramePicker, setShowFramePicker] = useState(false);
+  const [figmaPages, setFigmaPages] = useState<FigmaPage[]>([]);
+  const [figmaFileKey, setFigmaFileKey] = useState<string | null>(null);
+  const [figmaPickerLoading, setFigmaPickerLoading] = useState(false);
+  const [figmaPickerError, setFigmaPickerError] = useState("");
+  const [selectedFrame, setSelectedFrame] = useState<{ frameName: string; pageName: string } | null>(null);
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [frameSearch, setFrameSearch] = useState("");
+
   const u = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const openFramePicker = async () => {
+    setShowFramePicker(true);
+    setFigmaPickerError("");
+    if (figmaPages.length > 0) return;
+    setFigmaPickerLoading(true);
+    try {
+      const d = await j(`/api/boards/${boardId}/figma/frames`) as { pages?: FigmaPage[]; fileKey?: string; error?: string };
+      if (d.error) { setFigmaPickerError(d.error); return; }
+      setFigmaPages(d.pages ?? []);
+      setFigmaFileKey(d.fileKey ?? null);
+      // 첫 페이지와 그 안의 최상위 프레임들 자동 펼침
+      if (d.pages?.[0]) {
+        const ids = new Set<string>([d.pages[0].id]);
+        setExpandedNodes(ids);
+      }
+    } catch { setFigmaPickerError("Figma 프레임 목록을 불러오지 못했습니다."); }
+    finally { setFigmaPickerLoading(false); }
+  };
+
+  const handleSelectFrame = (page: FigmaPage, node: FigmaFrameNode) => {
+    if (!figmaFileKey) return;
+    const nodeIdInUrl = node.id.replace(/:/g, "-");
+    const url = `https://www.figma.com/file/${figmaFileKey}?node-id=${nodeIdInUrl}`;
+    u("url", url);
+    setSelectedFrame({ frameName: node.name, pageName: page.name });
+    setShowFramePicker(false);
+    setFrameSearch("");
+    handleUrlChange(url);
+  };
+
+  const toggleNode = (id: string) =>
+    setExpandedNodes(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  // 재귀 트리 노드 렌더러 (CreateIssueModal용)
+  function renderFigmaNode(node: FigmaFrameNode, page: FigmaPage, depth: number): React.ReactNode {
+    const hasChildren = (node.children?.length ?? 0) > 0;
+    const isExpanded = expandedNodes.has(node.id);
+    const pl = 12 + depth * 14;
+    return (
+      <div key={node.id}>
+        <div className="flex items-center group border-b border-gray-50 hover:bg-purple-50 transition-colors cursor-pointer"
+          style={{ paddingLeft: pl }} onClick={() => handleSelectFrame(page, node)}>
+          <span className={`w-4 shrink-0 text-[10px] text-center ${hasChildren ? "text-gray-400 hover:text-gray-700 cursor-pointer" : "opacity-0 pointer-events-none"}`}
+            onClick={hasChildren ? e => { e.stopPropagation(); toggleNode(node.id); } : undefined}>
+            {isExpanded ? "▾" : "▸"}
+          </span>
+          <span className={`text-[11px] shrink-0 mr-1.5 ${FIGMA_COLOR[node.type] ?? "text-gray-400"}`}>{FIGMA_ICON[node.type] ?? "▣"}</span>
+          <span className="text-xs text-gray-700 truncate py-1.5 flex-1 group-hover:text-purple-800">{node.name}</span>
+          {hasChildren && <span className="text-[10px] text-gray-400 pr-3 shrink-0">{node.children!.length}</span>}
+        </div>
+        {hasChildren && isExpanded && <div>{node.children!.map(child => renderFigmaNode(child, page, depth + 1))}</div>}
+      </div>
+    );
+  }
 
   // Figma URL 입력 시 프레임 미리보기 자동 로드
   const handleUrlChange = async (url: string) => {
@@ -1262,17 +1479,102 @@ function CreateIssueModal({ boardId, sprints, epics, onClose, onCreated }: { boa
             )}
           </div>
           <div>
-            <label className="block text-xs font-bold text-gray-600 uppercase mb-1.5">
-              URL
-              {f.url.includes("figma.com") && (
-                <span className="ml-2 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-bold normal-case">
-                  🎨 Figma 연동됨 — 댓글 자동 등록
-                </span>
-              )}
-            </label>
-            <input value={f.url} onChange={e => handleUrlChange(e.target.value)}
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold text-gray-600 uppercase">
+                URL
+                {f.url.includes("figma.com") && (
+                  <span className="ml-2 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-bold normal-case">
+                    🎨 Figma 연동됨 — 댓글 자동 등록
+                  </span>
+                )}
+              </label>
+              <button type="button" onClick={openFramePicker}
+                className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 transition-all">
+                🎨 Figma 레이어 선택
+              </button>
+            </div>
+
+            {/* 선택된 프레임 표시 */}
+            {selectedFrame && (
+              <div className="flex items-center gap-2 mb-1.5 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-xl">
+                <span className="text-purple-600 text-xs">▣</span>
+                <span className="text-xs text-purple-800 font-semibold">{selectedFrame.pageName} / {selectedFrame.frameName}</span>
+                <button type="button" onClick={() => { setSelectedFrame(null); u("url", ""); setFigmaPreview(null); }}
+                  className="ml-auto text-purple-400 hover:text-purple-600 text-xs">✕</button>
+              </div>
+            )}
+
+            <input value={f.url} onChange={e => { setSelectedFrame(null); handleUrlChange(e.target.value); }}
               placeholder="https://example.com  또는  figma.com/file/... (Figma URL 입력 시 자동 연동)"
               className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+
+            {/* Figma 레이어 피커 패널 */}
+            {showFramePicker && (
+              <div className="mt-2 border-2 border-purple-200 rounded-xl overflow-hidden shadow-lg bg-white">
+                <div className="flex items-center justify-between px-3 py-2 bg-purple-50 border-b border-purple-200">
+                  <span className="text-xs font-bold text-purple-800">🎨 Figma 레이어 선택</span>
+                  <button type="button" onClick={() => setShowFramePicker(false)} className="text-purple-400 hover:text-purple-600 text-xs">✕</button>
+                </div>
+
+                {figmaPickerLoading && (
+                  <div className="px-4 py-6 text-center text-xs text-purple-500">프레임 목록 불러오는 중...</div>
+                )}
+                {figmaPickerError && (
+                  <div className="px-4 py-3 text-xs text-red-600 bg-red-50">{figmaPickerError}</div>
+                )}
+                {!figmaPickerLoading && !figmaPickerError && figmaPages.length > 0 && (
+                  <>
+                    <div className="px-3 py-2 border-b border-gray-100">
+                      <input value={frameSearch} onChange={e => setFrameSearch(e.target.value)}
+                        placeholder="레이어 이름 검색..."
+                        className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-purple-400" />
+                    </div>
+                    <div className="max-h-64 overflow-y-auto">
+                      {frameSearch ? (
+                        // 검색 모드: 트리 평탄화해서 결과 표시
+                        figmaPages.flatMap(page => figmaFlatSearch(page.frames, frameSearch, page)).length === 0
+                          ? <p className="text-xs text-gray-400 text-center py-4">일치하는 레이어 없음</p>
+                          : figmaPages.flatMap(page => figmaFlatSearch(page.frames, frameSearch, page)).map(({ node, page, path }) => (
+                            <button key={node.id} type="button" onClick={() => handleSelectFrame(page, node)}
+                              className="w-full flex items-center gap-2 px-3 py-1.5 text-left border-b border-gray-50 hover:bg-purple-50 transition-colors">
+                              <span className={`text-[11px] shrink-0 ${FIGMA_COLOR[node.type] ?? "text-gray-400"}`}>{FIGMA_ICON[node.type] ?? "▣"}</span>
+                              <div className="min-w-0">
+                                <p className="text-xs text-gray-700 font-semibold truncate">{node.name}</p>
+                                <p className="text-[10px] text-gray-400 truncate">{page.name} / {path.split(" / ").slice(0, -1).join(" / ") || "—"}</p>
+                              </div>
+                            </button>
+                          ))
+                      ) : (
+                        // 트리 모드: 페이지 → 프레임 → 섹션 계층 표시
+                        figmaPages.map(page => (
+                          <div key={page.id}>
+                            {/* 페이지 헤더 */}
+                            <button type="button" onClick={() => toggleNode(page.id)}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 border-b border-gray-200 sticky top-0 z-10">
+                              <span className="text-gray-400 text-[10px]">{expandedNodes.has(page.id) ? "▾" : "▸"}</span>
+                              <span>📄 {page.name}</span>
+                              <span className="ml-auto text-gray-400 font-normal text-[10px]">{page.frames.length}개</span>
+                            </button>
+                            {expandedNodes.has(page.id) && (
+                              <div>
+                                {page.frames.length === 0
+                                  ? <p className="text-[10px] text-gray-400 px-4 py-2">프레임 없음</p>
+                                  : page.frames.map(frame => renderFigmaNode(frame, page, 0))
+                                }
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <div className="px-3 py-1.5 bg-gray-50 border-t border-gray-100 flex items-center gap-2">
+                      <span className="text-[10px] text-gray-400">▸ 펼치기 &nbsp;·&nbsp; 행 클릭 시 선택</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* Figma 프레임 미리보기 */}
             {figmaLoading && <p className="text-xs text-purple-500 mt-1.5">🎨 Figma 프레임 로딩 중...</p>}
             {figmaPreview && (

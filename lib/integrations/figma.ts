@@ -131,6 +131,45 @@ export async function deleteFigmaComment(fileKey: string, commentId: string, boa
   } catch { return false; }
 }
 
+// ── 파일 프레임 트리 조회 ─────────────────────────────────────────
+export interface FigmaFrameNode {
+  id: string;
+  name: string;
+  type: string;
+  children?: FigmaFrameNode[];
+}
+export interface FigmaPage { id: string; name: string; frames: FigmaFrameNode[]; }
+
+type RawNode = { id: string; name: string; type: string; children?: RawNode[] };
+const VISIBLE_TYPES = new Set(["FRAME", "SECTION", "COMPONENT", "COMPONENT_SET", "GROUP"]);
+
+function buildNodeTree(raw: RawNode): FigmaFrameNode {
+  const node: FigmaFrameNode = { id: raw.id, name: raw.name, type: raw.type };
+  const kids = (raw.children ?? []).filter(c => VISIBLE_TYPES.has(c.type)).map(buildNodeTree);
+  if (kids.length > 0) node.children = kids;
+  return node;
+}
+
+export async function getFigmaFileFrames(fileKey: string, boardToken?: string | null): Promise<FigmaPage[]> {
+  const token = resolveToken(boardToken);
+  if (!token) return [];
+  try {
+    // depth=3: 페이지 → 프레임 → 프레임 내 섹션/그룹까지 조회
+    const res = await fetch(`${BASE}/files/${fileKey}?depth=3`, { headers: { "X-Figma-Token": token } });
+    if (!res.ok) return [];
+    const data = await res.json() as { document: { children: RawNode[] } };
+    return data.document.children
+      .filter(page => page.type === "CANVAS")
+      .map(page => ({
+        id: page.id,
+        name: page.name,
+        frames: (page.children ?? [])
+          .filter(n => VISIBLE_TYPES.has(n.type))
+          .map(buildNodeTree),
+      }));
+  } catch { return []; }
+}
+
 // ── 3단계: Figma 프레임 스크린샷 URL 가져오기 ───────────────────
 export async function getFigmaFrameImage(fileKey: string, nodeId: string, boardToken?: string | null): Promise<string | null> {
   const token = resolveToken(boardToken);

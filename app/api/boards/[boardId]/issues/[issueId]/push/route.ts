@@ -1,7 +1,7 @@
 /**
  * POST /api/boards/[boardId]/issues/[issueId]/push
  * 기존 이슈를 Figma 코멘트 / GitHub 이슈로 수동 등록
- * body: { target: "figma" | "github" }
+ * body: { target: "figma" | "github", figmaNodeId?: string }
  */
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/db/client";
@@ -11,7 +11,7 @@ import { createGithubIssue } from "@/lib/integrations/github";
 type Params = { params: { boardId: string; issueId: string } };
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const { target } = await req.json() as { target: "figma" | "github" };
+  const { target, figmaNodeId } = await req.json() as { target: "figma" | "github"; figmaNodeId?: string };
 
   const [issue, board] = await Promise.all([
     prisma.issue.findUnique({ where: { id: params.issueId } }),
@@ -33,11 +33,13 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "이미 Figma 코멘트가 등록되어 있습니다." }, { status: 409 });
     }
 
-    // 이슈 targetUrl에서 파일키/노드ID 파싱, 없으면 보드 파일키 사용
     let fileKey = board.figmaFileKey;
     let nodeId: string | undefined;
 
-    if (issue.targetUrl?.includes("figma.com")) {
+    // 레이어 피커에서 선택한 nodeId 우선 적용
+    if (figmaNodeId) {
+      nodeId = figmaNodeId;
+    } else if (issue.targetUrl?.includes("figma.com")) {
       const { parseFigmaUrl } = await import("@/lib/integrations/figma");
       const parsed = parseFigmaUrl(issue.targetUrl);
       if (parsed) { fileKey = parsed.fileKey; nodeId = parsed.nodeId; }
