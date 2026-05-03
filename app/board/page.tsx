@@ -22,7 +22,7 @@ interface Issue {
   assignee?: string; reporter?: string; epicName?: string; storyPoints?: number;
   screenshotUrl?: string; targetUrl?: string; environment?: string;
   stepToReproduce?: string; expectedResult?: string; actualResult?: string;
-  tags: string[]; dueDate?: string; resolvedAt?: string; sprintId?: string;
+  tags: string[]; dueDate?: string; resolvedAt?: string; sprintId?: string; externalIds?: string;
   createdAt: string; updatedAt: string;
   _count: { comments: number };
 }
@@ -421,11 +421,12 @@ export default function BoardPage() {
 
       {/* ── Detail Panel ── */}
       {detail && active && (
-        <DetailPanel issue={detail} boardId={active.id} allIssues={issues}
+        <DetailPanel issue={detail} boardId={active.id} board={active} allIssues={issues}
           onClose={() => setDetail(null)}
           onStatusChange={s => changeStatus(detail, s)}
           onDelete={() => handleDelete(detail)}
           onUpdate={async d => { await jpatch(`/api/boards/${active.id}/issues/${detail.id}`, d); await loadIssues(active.id); setDetail(p => p ? { ...p, ...d } : null); }}
+          onExternalUpdate={() => loadIssues(active.id)}
         />
       )}
 
@@ -667,12 +668,15 @@ function BacklogView({ issues, sprints, activeSprint, selected, onDetail, onStat
 }
 
 // ─── Detail Panel ─────────────────────────────────────────────
-function DetailPanel({ issue, boardId, allIssues, onClose, onStatusChange, onDelete, onUpdate }: {
-  issue: Issue; boardId: string; allIssues: Issue[];
+function DetailPanel({ issue, boardId, board, allIssues, onClose, onStatusChange, onDelete, onUpdate, onExternalUpdate }: {
+  issue: Issue; boardId: string; board: Board; allIssues: Issue[];
   onClose: () => void; onStatusChange: (s: Status) => void;
   onDelete: () => void; onUpdate: (d: Partial<Issue>) => Promise<void>;
+  onExternalUpdate: () => void;
 }) {
-  const [tab, setTab] = useState<"detail" | "activity" | "links">("detail");
+  const [tab, setTab] = useState<"detail" | "activity" | "links" | "integrations">("detail");
+  const [pushing, setPushing] = useState<"figma" | "github" | null>(null);
+  const [pushMsg, setPushMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [links, setLinks] = useState<IssueLink[]>([]);
   const [comment, setComment] = useState("");
@@ -706,6 +710,21 @@ function DetailPanel({ issue, boardId, allIssues, onClose, onStatusChange, onDel
   const saveTitle = async () => {
     if (!titleVal.trim() || titleVal === issue.title) { setEditTitle(false); return; }
     await onUpdate({ title: titleVal }); setEditTitle(false);
+  };
+
+  const handlePush = async (target: "figma" | "github") => {
+    setPushing(target); setPushMsg(null);
+    const d = await jpost(`/api/boards/${boardId}/issues/${issue.id}/push`, { target }) as { ok?: boolean; error?: string; commentId?: string; issueNumber?: number; repo?: string };
+    setPushing(null);
+    if (d.error) {
+      setPushMsg({ type: "err", text: d.error });
+    } else {
+      const msg = target === "figma"
+        ? `✅ Figma 코멘트 등록됨 (ID: ${d.commentId})`
+        : `✅ GitHub 이슈 #${d.issueNumber} 등록됨 (${d.repo})`;
+      setPushMsg({ type: "ok", text: msg });
+      onExternalUpdate(); // 이슈 목록 새로고침 (externalIds 업데이트 반영)
+    }
   };
 
   const addIssueLink = async () => {
@@ -813,10 +832,10 @@ function DetailPanel({ issue, boardId, allIssues, onClose, onStatusChange, onDel
       </div>
       {/* Tabs */}
       <div className="flex border-b shrink-0">
-        {(["detail", "activity", "links"] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)}
+        {(["detail", "activity", "links", "integrations"] as const).map(t => (
+          <button key={t} onClick={() => { setTab(t); setPushMsg(null); }}
             className={`flex-1 text-[10px] font-bold py-2 transition-colors ${tab === t ? "border-b-2 border-[#0052CC] text-[#0052CC]" : "text-gray-400 hover:text-gray-600"}`}>
-            {t === "detail" ? "상세" : t === "activity" ? `활동 ${activity.length}` : `링크 ${links.length}`}
+            {t === "detail" ? "상세" : t === "activity" ? `활동 ${activity.length}` : t === "links" ? `링크 ${links.length}` : "연동"}
           </button>
         ))}
       </div>
@@ -907,6 +926,77 @@ function DetailPanel({ issue, boardId, allIssues, onClose, onStatusChange, onDel
             )}
           </div>
         )}
+        {tab === "integrations" && (() => {
+          const ext: Record<string, string> = (() => { try { return JSON.parse(issue.externalIds ?? "{}"); } catch { return {}; } })();
+          const hasFigma   = !!ext.figma_comment_id;
+          const hasGithub  = !!ext.github_issue_number;
+          const canFigma   = !!(board.figmaFileKey || issue.targetUrl?.includes("figma.com"));
+          const canGithub  = !!(board.githubOwner && board.githubRepo && board.hasGithubToken);
+
+          return (
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {pushMsg && (
+                <div className={`text-xs px-3 py-2.5 rounded-xl font-semibold ${pushMsg.type === "ok" ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                  {pushMsg.text}
+                </div>
+              )}
+
+              {/* Figma */}
+              <div className={`rounded-2xl border p-4 space-y-3 ${hasFigma ? "border-purple-200 bg-purple-50" : "border-gray-200"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🎨</span>
+                  <p className="text-sm font-black text-gray-800">Figma 코멘트</p>
+                  {hasFigma && <span className="ml-auto text-[10px] bg-purple-200 text-purple-800 font-bold px-2 py-0.5 rounded-full">✅ 등록됨</span>}
+                </div>
+                {hasFigma ? (
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500">코멘트 ID: <code className="font-mono text-purple-700">{ext.figma_comment_id}</code></p>
+                    <p className="text-xs text-gray-400">파일 키: <code className="font-mono">{ext.figma_file_key}</code></p>
+                  </div>
+                ) : (
+                  <>
+                    {!canFigma && (
+                      <p className="text-xs text-gray-400">보드에 Figma 파일이 연동되지 않았습니다. <a href="#" onClick={e => { e.preventDefault(); onClose(); }} className="text-[#0052CC] hover:underline">⚙ 연동 설정</a>에서 추가하세요.</p>
+                    )}
+                    <button onClick={() => handlePush("figma")} disabled={!!pushing || !canFigma}
+                      className="w-full bg-purple-600 text-white py-2.5 rounded-xl text-xs font-black hover:bg-purple-700 disabled:opacity-40 transition-colors">
+                      {pushing === "figma" ? "Figma에 등록 중..." : "🎨 Figma 코멘트로 등록"}
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* GitHub */}
+              <div className={`rounded-2xl border p-4 space-y-3 ${hasGithub ? "border-gray-800 bg-gray-50" : "border-gray-200"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🐙</span>
+                  <p className="text-sm font-black text-gray-800">GitHub 이슈</p>
+                  {hasGithub && <span className="ml-auto text-[10px] bg-gray-800 text-white font-bold px-2 py-0.5 rounded-full">✅ #{ext.github_issue_number}</span>}
+                </div>
+                {hasGithub ? (
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500">레포: <code className="font-mono">{ext.github_repo}</code></p>
+                    <a href={`https://github.com/${ext.github_repo}/issues/${ext.github_issue_number}`}
+                      target="_blank" rel="noopener noreferrer"
+                      className="text-xs text-[#0052CC] hover:underline">
+                      GitHub에서 보기 → #{ext.github_issue_number}
+                    </a>
+                  </div>
+                ) : (
+                  <>
+                    {!canGithub && (
+                      <p className="text-xs text-gray-400">보드에 GitHub 레포가 연동되지 않았습니다. ⚙ 연동 설정에서 추가하세요.</p>
+                    )}
+                    <button onClick={() => handlePush("github")} disabled={!!pushing || !canGithub}
+                      className="w-full bg-gray-900 text-white py-2.5 rounded-xl text-xs font-black hover:bg-gray-700 disabled:opacity-40 transition-colors">
+                      {pushing === "github" ? "GitHub에 등록 중..." : "🐙 GitHub 이슈로 등록"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
       {/* Delete */}
       <div className="border-t p-3 shrink-0">
