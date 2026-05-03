@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "node scripts/prisma-setup.js && prisma generate && next build",
-    "start": "node scripts/prisma-setup.js && prisma db push --accept-data-loss && next start -p ${PORT:-3000}",
+    "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",

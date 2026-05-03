@@ -20,8 +20,7 @@ RUN npx playwright install chromium --with-deps
 # Copy source and build
 COPY . .
 
-RUN npx prisma generate
-
+# Build: provider 전환 → prisma generate → next build
 RUN npm run build
 
 # Ensure screenshot / data dirs exist
@@ -32,5 +31,5 @@ ENV PLAYWRIGHT_HEADLESS=true
 
 EXPOSE 3000
 
-# Railway injects $PORT — Next.js 14 reads it natively
-CMD ["npm", "start"]
+# 시작: provider 전환 → db push → next start (exec으로 직접 실행해 signal 정상 전달)
+CMD ["sh", "-c", "node scripts/prisma-setup.js && npx prisma db push --accept-data-loss && exec node_modules/.bin/next start"]
